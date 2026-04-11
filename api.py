@@ -15,6 +15,7 @@ api_bp = Blueprint('api', __name__)
 
 # --- Database Models ---
 class User(db.Model):
+    __tablename__ = 'users'
     id = db.Column(db.Integer, primary_key=True)
     username = db.Column(db.String(80), unique=True, nullable=False)
     password = db.Column(db.String(120), nullable=False)
@@ -34,6 +35,7 @@ class DeviceCommand(db.Model):
     timestamp = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 class PredictionRecord(db.Model):
+    __tablename__ = 'predictionbs_history'
     id = db.Column(db.Integer, primary_key=True)
     device_id = db.Column(db.String(50), nullable=False)
     timestamp = db.Column(db.DateTime, nullable=False)
@@ -59,7 +61,7 @@ class CommandQueue(db.Model):
 
 # --- API Endpoints ---
 
-@api_bp.route('/login', methods=['POST'])
+@api_bp.route('/api/login', methods=['POST'])
 def login():
     """Validates username and password and returns an access token."""
     data = request.get_json()

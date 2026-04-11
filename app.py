@@ -1,6 +1,6 @@
 import os
 
-import CORS
+from flask_cors import CORS
 from flask import Flask
 # Import the blueprint, extensions, and models from api.py
 from api import api_bp, db, jwt, User
@@ -9,7 +9,7 @@ app = Flask(__name__)
 # Enable CORS so  React frontend can communicate with this API
 CORS(app)
 # --- Configuration ---
-app.config['SQLALCHEMY_DATABASE_URI'] = 'postgresql://user:password@localhost/dbname'
+app.config['SQLALCHEMY_DATABASE_URI'] = 'postgresql://agribot-admin:1234@localhost:5432/agribot'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['JWT_SECRET_KEY'] = 'your-super-secret-jwt-key'
 
@@ -33,7 +33,7 @@ if __name__ == '__main__':
 
         # Create a dummy user for testing if the table is empty
         if not User.query.first():
-            test_user = User(username="user1", password="password123")
+            test_user = User(username="guest", password="guest1234")
             db.session.add(test_user)
             db.session.commit()
 
