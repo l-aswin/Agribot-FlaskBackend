@@ -1,13 +1,12 @@
 import os
-
-from flask_cors import CORS
 from flask import Flask
-# Import the blueprint, extensions, and models from api.py
-from api import api_bp, db, jwt, User
+from flask_cors import CORS
+from models import db, jwt, User
+from routes import all_blueprints
 
 app = Flask(__name__)
-# Enable CORS so  React frontend can communicate with this API
 CORS(app)
+
 # --- Configuration ---
 app.config['SQLALCHEMY_DATABASE_URI'] = 'postgresql://agribot-admin:1234@localhost:5432/agribot'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
@@ -18,24 +17,19 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
 # --- Initialize Extensions ---
-# This binds the db and jwt instances from api.py to this specific Flask app
 db.init_app(app)
 jwt.init_app(app)
 
 # --- Register Blueprints ---
-# This tells Flask about all the routes you defined in api.py
-app.register_blueprint(api_bp)
+for bp in all_blueprints:
+    app.register_blueprint(bp)
 
 if __name__ == '__main__':
-    # Initialize the database tables before running
     with app.app_context():
         db.create_all()
 
-        # Create a dummy user for testing if the table is empty
         if not User.query.first():
-            test_user = User(username="guest", password="guest1234")
-            db.session.add(test_user)
+            db.session.add(User(username="guest", password="guest1234"))
             db.session.commit()
 
-    # Run the server
     app.run(debug=True, host='0.0.0.0', port=5000)
