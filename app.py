@@ -3,7 +3,7 @@ import os
 from flask_cors import CORS
 from flask import Flask
 # Import the blueprint, extensions, and models from api.py
-from api import api_bp, db, jwt, User
+from api import api_bp, db, jwt, User, Field, Device, Route, Run, DetectionLog, DeviceCommand, PredictionRecord, CommandQueue
 
 app = Flask(__name__)
 # Enable CORS so  React frontend can communicate with this API
