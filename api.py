@@ -123,15 +123,15 @@ def create_field():
     data = request.get_json() or {}
     name = data.get('name')
     width = data.get('width')
-    height = data.get('height')
-    if not name or width is None or height is None:
-        return jsonify({'message': 'name, width, and height are required'}), 400
+    length = data.get('length')
+    if not name or width is None or length is None:
+        return jsonify({'message': 'name, width, and length are required'}), 400
     field = Field(
         name=name,
         width=int(width),
-        height=int(height),
+        length=int(length),
         partition_type=data.get('partition_type', 'grid'),
-        partition_count=data.get('partition_count', int(width) * int(height)),
+        partition_count=data.get('partition_count', int(width) * int(length)),
     )
     db.session.add(field)
     db.session.commit()
@@ -145,7 +145,7 @@ def update_field(field_id):
     if not field:
         return jsonify({'message': 'Field not found'}), 404
     data = request.get_json() or {}
-    for attr in ('name', 'width', 'height', 'partition_type', 'partition_count'):
+    for attr in ('name', 'width', 'length', 'partition_type', 'partition_count'):
         if attr in data:
             setattr(field, attr, data[attr])
     db.session.commit()
@@ -462,7 +462,8 @@ def run_detection_logs(run_id):
         return jsonify({'message': 'Run not found'}), 404
     page = request.args.get('page', 1, type=int)
     limit = request.args.get('limit', 10, type=int)
-    q = DetectionLog.query.filter_by(run_id=run_id).order_by(DetectionLog.timestamp.asc())
+    # Per DEVELOPER_REFERENCE, this should return richer log data from WeedDetection
+    q = WeedDetection.query.filter_by(run_id=run_id).order_by(WeedDetection.detected_at.asc())
     total = q.count()
     logs = q.offset((page - 1) * limit).limit(limit).all()
     return jsonify({'total': total, 'logs': [l.to_dict() for l in logs]}), 200
@@ -546,7 +547,9 @@ def detection_stop(device_id):
         return jsonify({'message': 'Device not found'}), 404
     run = Run.query.filter_by(device_db_id=device_id, status='running').order_by(Run.started_at.desc()).first()
     if not run:
-        return jsonify({'message': 'No active run found for this device'}), 404
+        device.working = False
+        db.session.commit()
+        return jsonify({'message': 'No active run to stop'}), 200
     run.status = 'stopped'
     run.stopped_at = datetime.now(timezone.utc)
     device.working = False
@@ -917,17 +920,30 @@ def iot_upload():
         run.total_photos += 1
         weed_count = len(detections)
         run.total_weeds += weed_count
-        run.cells_scanned += 1
+        if weed_count > 0:
+            run.cells_scanned += 1
+
+        # Calculate grid position from step_index for grid mode runs
+        grid_x, grid_y = None, None
+        if run.mode == 'grid' and run.grid_x and run.grid_x > 0:
+            try:
+                step = int(step_index)
+                grid_y = step // run.grid_x
+                grid_x = step % run.grid_x
+            except (ValueError, TypeError):
+                pass  # grid_x/y will remain None
+
         for det in detections:
-            log = DetectionLog(
+            wd = WeedDetection(
                 run_id=run.id,
-                timestamp=datetime.now(timezone.utc),
+                field_id=run.field_id,
+                grid_x=grid_x,
+                grid_y=grid_y,
                 species=det.get('label', 'weed'),
-                confidence=det.get('confidence', 0.0),
-                cell=str(step_index),
-                photo_url=ann_path,
+                original_image_path=raw_path,
+                annotated_image_path=ann_path,
             )
-            db.session.add(log)
+            db.session.add(wd)
         db.session.commit()
 
     return jsonify({'message': 'Upload received'}), 200

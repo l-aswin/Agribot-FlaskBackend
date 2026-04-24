@@ -32,7 +32,7 @@ class Field(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     name = db.Column(db.String(100), nullable=False)
     width = db.Column(db.Integer, nullable=False)
-    height = db.Column(db.Integer, nullable=False)
+    length = db.Column(db.Integer, nullable=False)
     partition_type = db.Column(db.String(50), default='grid')
     partition_count = db.Column(db.Integer, default=0)
     created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
@@ -42,7 +42,7 @@ class Field(db.Model):
             'id': self.id,
             'name': self.name,
             'width': self.width,
-            'height': self.height,
+            'length': self.length,
             'partition_type': self.partition_type,
             'partition_count': self.partition_count,
             'created_at': self.created_at.isoformat() if self.created_at else None,
@@ -117,18 +117,29 @@ class Run(db.Model):
     cells_scanned = db.Column(db.Integer, default=0)
     grid_state_json = db.Column(db.Text)   # JSON 2D array of weed counts
 
+    field = db.relationship('Field', foreign_keys=[field_id], lazy='joined')
+
     def cells_total(self):
         return self.grid_x * self.grid_y
 
     def to_dict(self):
+        duration = None
+        if self.started_at and self.finished_at:
+            duration = int((self.finished_at - self.started_at).total_seconds())
         return {
-            'id': self.id,
+            'run_id': self.id,
+            'run_number': self.id,
             'device_id': self.device_id,
             'field_id': self.field_id,
+            'field': self.field.name if self.field else None,
             'mode': self.mode,
+            'status': self.status,
+            'datetime': self.started_at.isoformat() if self.started_at else None,
             'started_at': self.started_at.isoformat() if self.started_at else None,
             'finished_at': self.finished_at.isoformat() if self.finished_at else None,
+            'weeds': self.total_weeds,
             'total_weeds': self.total_weeds,
+            'duration': duration,
         }
 
     def _init_grid(self):
@@ -151,8 +162,8 @@ class WeedDetection(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     run_id = db.Column(db.Integer, db.ForeignKey('runs.id'), nullable=False)
     field_id = db.Column(db.Integer, db.ForeignKey('fields.id'), nullable=False)
-    grid_x = db.Column(db.Integer, nullable=False)
-    grid_y = db.Column(db.Integer, nullable=False)
+    grid_x = db.Column(db.Integer, nullable=True)
+    grid_y = db.Column(db.Integer, nullable=True)
     coord_x = db.Column(db.Float, nullable=True)
     coord_y = db.Column(db.Float, nullable=True)
     species = db.Column(db.String(100), nullable=False)
@@ -160,6 +171,23 @@ class WeedDetection(db.Model):
     original_image_path = db.Column(db.String(255), nullable=True)
     annotated_image_path = db.Column(db.String(255), nullable=True)
     detected_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+    def to_dict(self):
+        """Serializes the object to a dictionary matching the format in DEVELOPER_REFERENCE.md."""
+        import os
+        original_filename = os.path.basename(self.original_image_path) if self.original_image_path else None
+        annotated_filename = os.path.basename(self.annotated_image_path) if self.annotated_image_path else None
+
+        grid_pos_str = f"{self.grid_x},{self.grid_y}" if self.grid_x is not None and self.grid_y is not None else None
+
+        return {
+            'id': self.id,
+            'grid_pos': grid_pos_str,
+            'original_url': f"/api/media/original/{original_filename}" if original_filename else None,
+            'annotated_url': f"/api/media/annotated/{annotated_filename}" if annotated_filename else None,
+            'species': self.species,
+            'timestamp': self.detected_at.isoformat() if self.detected_at else None,
+        }
 
 
 class Route(db.Model):

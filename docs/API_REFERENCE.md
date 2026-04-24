@@ -586,11 +586,13 @@ Paginated list of individual weed detection events for a run.
   "logs": [
     {
       "id": 1,
-      "timestamp": "2024-01-01T09:05:00+00:00",
+      "grid_pos": "1,2",
+      "original_url": "/api/media/original/AB01_job7_step1_raw.jpg",
+      "annotated_url": "/api/media/annotated/AB01_job7_step1_annotated.jpg",
       "species": "Dandelion",
-      "confidence": 0.95,
-      "cell": "1,2",
-      "photo_url": "/uploads/AB01_weed_001.jpg"
+      "lat": 40.7128,
+      "lon": -74.0060,
+      "timestamp": "2024-01-01T09:05:00+00:00"
     }
   ]
 }

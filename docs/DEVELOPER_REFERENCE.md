@@ -353,10 +353,11 @@ All data is fetched in parallel on mount using `Promise.allSettled`.
   "logs": [
     {
       "id": 1,
-      "timestamp": "2024-01-01T09:05:00Z",
+      "grid_pos": "A3",
+      "original_url": "https://example.com/path/to/original.jpg",
+      "annotated_url": "https://example.com/path/to/annotated.jpg",
       "species": "Dandelion",
-      "confidence": 0.95,
-      "cell": "A3"
+      "timestamp": "2024-01-01T09:05:00Z"
     }
   ]
 }
@@ -492,17 +493,13 @@ Fleet management screen for registering and managing robots.
 {
   "name": "AgriBot-02",
   "device_id": "AB02",
-  "device_secret": "my-secret",
   "server_url": "http://192.168.1.11",
   "serial_port": "/dev/ttyUSB0",
   "serial_baud_rate": 115200,
   "camera_index": 0,
-  "confidence_threshold": 0.75,
-  "camera_vision_width_cm": 50
+  "confidence_threshold": 0.75
 }
 ```
-
-> `device_id` and `device_secret` must match the values in the edge device's `config.json`. The device uses these for all IoT endpoint requests instead of JWT.
 
 **Check name response:**
 
@@ -555,12 +552,9 @@ Configuration editor for a selected device. The user picks a device from a dropd
   "serial_port": "/dev/ttyUSB0",
   "serial_baud_rate": 115200,
   "camera_index": 0,
-  "confidence_threshold": 0.70,
-  "camera_vision_width_cm": 50
+  "confidence_threshold": 0.70
 }
 ```
-
-> When `confidence_threshold` or `camera_vision_width_cm` are included in a PUT request, the server automatically queues an `update` IoT command for the edge device to apply on its next poll cycle.
 
 ---
 
@@ -590,9 +584,9 @@ All endpoints are prefixed with the base URL (`VITE_API_BASE_URL`, default `http
 | Method | Path | Description |
 |---|---|---|
 | `GET` | `/api/devices` | List all devices |
-| `GET` | `/api/devices/{id}` | Get single device (includes `camera_vision_width_cm`, `state`) |
+| `GET` | `/api/devices/{id}` | Get single device |
 | `GET` | `/api/devices/{id}/ping` | Ping device (connectivity check) |
-| `POST` | `/api/devices` | Register new device (accepts `device_secret`, `camera_vision_width_cm`) |
+| `POST` | `/api/devices` | Register new device |
 | `DELETE` | `/api/devices/{id}` | Delete device |
 | `GET` | `/api/devices/check-name?name=` | Check if device name is available |
 
@@ -620,8 +614,8 @@ All endpoints are prefixed with the base URL (`VITE_API_BASE_URL`, default `http
 
 | Method | Path | Description |
 |---|---|---|
-| `POST` | `/api/devices/{id}/detection/start` | Start a detection run (queues IoT `start` command) |
-| `POST` | `/api/devices/{id}/detection/stop` | Stop the active run (queues IoT `stop` command) |
+| `POST` | `/api/devices/{id}/detection/start` | Start a detection run |
+| `POST` | `/api/devices/{id}/detection/stop` | Stop the active run |
 | `GET` | `/api/devices/{id}/detection/status` | Current run progress & status |
 | `GET` | `/api/devices/{id}/detection/grid` | Live detection grid state |
 
@@ -629,14 +623,7 @@ All endpoints are prefixed with the base URL (`VITE_API_BASE_URL`, default `http
 
 | Method | Path | Description |
 |---|---|---|
-| `POST` | `/api/devices/{id}/move` | Send a move command (legacy integer queue) |
-
-### Device Control — Pending Upload
-
-| Method | Path | Description |
-|---|---|---|
-| `POST` | `/api/devices/{id}/pending-upload/start` | Queue `start_pending_upload` for the edge device |
-| `POST` | `/api/devices/{id}/pending-upload/stop` | Queue `stop_pending_upload` for the edge device |
+| `POST` | `/api/devices/{id}/move` | Send a move command |
 
 ### Routes
 
@@ -652,23 +639,8 @@ All endpoints are prefixed with the base URL (`VITE_API_BASE_URL`, default `http
 
 | Method | Path | Description |
 |---|---|---|
-| `GET` | `/api/devices/{id}/settings` | Fetch current device configuration (includes `camera_vision_width_cm`) |
-| `PUT` | `/api/devices/{id}/settings` | Push updated configuration; queues IoT `update` command if `confidence_threshold` or `camera_vision_width_cm` changed |
-
-### IoT Device Endpoints (edge device → server)
-
-No JWT required. Authenticate via `device_id` + `device_secret`.
-
-| Method | Path | SRS | Description |
-|---|---|---|---|
-| `GET` | `/api/iot_device/devicecheck` | SR-09 | Startup credential check |
-| `POST` | `/api/iot_device/command` | SR-13 | Command polling — returns next pending command or `null` |
-| `POST` | `/api/iot_device/upload` | SR-38, SR-50 | Multipart upload: raw image, annotated image, detection JSON |
-| `POST` | `/api/iot_device/completed` | SR-26, SR-31 | Job completion or abort notification |
-| `POST` | `/api/iot_device/settings/status` | SR-17 | Settings update acknowledgement |
-| `POST` | `/api/iot_device/device/state` | SR-49, SR-51 | Device state change (`idle`, `working`, `pending_upload`) |
-| `POST` | `/api/iot_device/history/completed` | SR-51 | Pending upload summary (`succeeded`, `failed` counts) |
-| `GET` | `/api/iot_device/route` | SR-27a | Fetch route steps by `route_name` |
+| `GET` | `/api/devices/{id}/settings` | Fetch current device configuration |
+| `PUT` | `/api/devices/{id}/settings` | Push updated configuration to device |
 
 ---
 
@@ -700,15 +672,11 @@ No JWT required. Authenticate via `device_id` + `device_secret`.
   "serial_baud_rate": 115200,
   "camera_index": 0,
   "confidence_threshold": 0.75,
-  "camera_vision_width_cm": 50,
   "status": "online",
   "working": false,
-  "state": "idle",
   "created_at": "2024-01-01T00:00:00Z"
 }
 ```
-
-`state` values: `"idle"` | `"working"` | `"pending_upload"` — updated by the edge device via `POST /api/iot_device/device/state`.
 
 ### Run
 
@@ -730,11 +698,11 @@ No JWT required. Authenticate via `device_id` + `device_secret`.
 {
   "id": 1,
   "run_id": 1,
-  "timestamp": "2024-01-01T09:05:00Z",
+  "grid_pos": "A3",
+  "original_url": "/photos/run1/A3_original.jpg",
+  "annotated_url": "/photos/run1/A3_annotated.jpg",
   "species": "Dandelion",
-  "confidence": 0.95,
-  "cell": "A3",
-  "photo_url": "/photos/run1/A3_001.jpg"
+  "timestamp": "2024-01-01T09:05:00Z"
 }
 ```
 
