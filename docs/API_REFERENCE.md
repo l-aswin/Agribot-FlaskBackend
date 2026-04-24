@@ -2,11 +2,13 @@
 
 > **Base URL:** `http://localhost:5000` (configurable via `VITE_API_BASE_URL` on the frontend)
 >
-> **Authentication:** All endpoints except login require a Bearer token in the `Authorization` header.
+> **Authentication:** All endpoints except login and the IoT device endpoints require a Bearer token in the `Authorization` header.
 > ```
 > Authorization: Bearer <access_token>
 > ```
 > Obtain a token from `POST /api/auth/login`.
+>
+> IoT device endpoints (under `/api/iot_device/`) authenticate using `device_id` and `device_secret` in the request body or query parameters — no JWT required.
 
 ---
 
@@ -20,10 +22,12 @@
 6. [Runs / Analytics](#6-runs--analytics)
 7. [Device Control — Detection](#7-device-control--detection)
 8. [Device Control — Manual Movement](#8-device-control--manual-movement)
-9. [Routes](#9-routes)
-10. [Jetson Device Endpoints](#10-jetson-device-endpoints)
-11. [Error Responses](#11-error-responses)
-12. [Data Models](#12-data-models)
+9. [Device Control — Pending Upload](#9-device-control--pending-upload)
+10. [Routes](#10-routes)
+11. [IoT Device Endpoints](#11-iot-device-endpoints)
+12. [Legacy Endpoints](#12-legacy-endpoints)
+13. [Error Responses](#13-error-responses)
+14. [Data Models](#14-data-models)
 
 ---
 
@@ -173,11 +177,6 @@ Delete a field.
 { "message": "Field deleted" }
 ```
 
-**Response `404`:**
-```json
-{ "message": "Field not found" }
-```
-
 ---
 
 ## 3. Devices
@@ -224,7 +223,8 @@ Get a single device including its configuration settings.
   "serial_port": "/dev/ttyUSB0",
   "serial_baud_rate": 115200,
   "camera_index": 0,
-  "confidence_threshold": 0.75
+  "confidence_threshold": 0.75,
+  "camera_vision_width_cm": 50
 }
 ```
 
@@ -265,23 +265,27 @@ Register a new device.
 {
   "name": "AgriBot-02",
   "device_id": "AB02",
+  "device_secret": "my-secret",
   "server_url": "http://192.168.1.11",
   "serial_port": "/dev/ttyUSB0",
   "serial_baud_rate": 115200,
   "camera_index": 0,
-  "confidence_threshold": 0.75
+  "confidence_threshold": 0.75,
+  "camera_vision_width_cm": 50
 }
 ```
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `name` | string | Yes | Unique human-readable name |
-| `device_id` | string | Yes | Unique device identifier (e.g. `"AB02"`) |
+| `device_id` | string | Yes | Unique device identifier matching the edge device's `config.json` |
+| `device_secret` | string | Yes | Secret matching the edge device's `config.json` |
 | `server_url` | string | No | Device HTTP address |
 | `serial_port` | string | No | Serial port path |
 | `serial_baud_rate` | integer | No | Default: `115200` |
 | `camera_index` | integer | No | Default: `0` |
 | `confidence_threshold` | float | No | Default: `0.75` |
+| `camera_vision_width_cm` | integer | No | Default: `50` |
 
 **Response `201`:** Full device object (same as GET single device)
 
@@ -336,7 +340,8 @@ Fetch the current configuration for a device.
   "serial_port": "/dev/ttyUSB0",
   "serial_baud_rate": 115200,
   "camera_index": 0,
-  "confidence_threshold": 0.75
+  "confidence_threshold": 0.75,
+  "camera_vision_width_cm": 50
 }
 ```
 
@@ -344,11 +349,21 @@ Fetch the current configuration for a device.
 
 ### PUT `/api/devices/{id}/settings`
 
-Push updated configuration to a device.
+Push updated configuration to a device. If `confidence_threshold` or `camera_vision_width_cm` are included, an `update` command is automatically queued for the edge device to consume on its next poll.
 
 **Auth required:** Yes
 
-**Request body:** Any subset of the settings fields (`server_url`, `serial_port`, `serial_baud_rate`, `camera_index`, `confidence_threshold`).
+**Request body:** Any subset of the settings fields.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `server_url` | string | Device HTTP address |
+| `serial_port` | string | Serial port path |
+| `serial_baud_rate` | integer | Baud rate |
+| `camera_index` | integer | Camera device index |
+| `confidence_threshold` | float | YOLO confidence threshold `[0.0, 1.0]` |
+| `camera_vision_width_cm` | integer | Camera frame ground width in cm |
+| `device_secret` | string | Edge device authentication secret |
 
 **Response `200`:** Updated settings object (same shape as GET)
 
@@ -571,11 +586,13 @@ Paginated list of individual weed detection events for a run.
   "logs": [
     {
       "id": 1,
-      "timestamp": "2024-01-01T09:05:00+00:00",
+      "grid_pos": "1,2",
+      "original_url": "/api/media/original/AB01_job7_step1_raw.jpg",
+      "annotated_url": "/api/media/annotated/AB01_job7_step1_annotated.jpg",
       "species": "Dandelion",
-      "confidence": 0.95,
-      "cell": "1,2",
-      "photo_url": "/uploads/AB01_weed_001.jpg"
+      "lat": 40.7128,
+      "lon": -74.0060,
+      "timestamp": "2024-01-01T09:05:00+00:00"
     }
   ]
 }
@@ -587,7 +604,7 @@ Paginated list of individual weed detection events for a run.
 
 ### POST `/api/devices/{id}/detection/start`
 
-Start a detection run on a device.
+Start a detection run on a device. Automatically queues a `start` IoT command for the edge device to consume on its next poll.
 
 **Auth required:** Yes
 
@@ -613,12 +630,22 @@ Start a detection run on a device.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `mode` | `"grid"` \| `"route"` | Yes | Detection mode |
+| `mode` | `"grid"` \| `"route"` | Yes | Detection mode (`"grid"` maps to Mode B on the device; `"route"` maps to Mode C) |
 | `field_id` | integer | No | Associated field |
 | `grid_x` | integer | Grid mode | Number of columns |
 | `grid_y` | integer | Grid mode | Number of rows |
-| `distance` | integer | Grid mode | Cell distance in cm |
+| `distance` | integer | Grid mode | Cell distance in cm (sent as `travel_distance_cm` to the device) |
 | `route_id` | integer | Route mode | ID of a saved route |
+
+**IoT command queued (grid mode):**
+```json
+{ "command": "start", "payload": { "mode": "B", "job_id": 7, "travel_distance_cm": 100 } }
+```
+
+**IoT command queued (route mode):**
+```json
+{ "command": "start", "payload": { "mode": "C", "job_id": 7, "route_name": "Perimeter Sweep" } }
+```
 
 **Response `201`:**
 ```json
@@ -634,7 +661,7 @@ Start a detection run on a device.
 
 ### POST `/api/devices/{id}/detection/stop`
 
-Stop the active detection run on a device.
+Stop the active detection run on a device. Queues a `stop` IoT command for the edge device.
 
 **Auth required:** Yes
 
@@ -690,7 +717,7 @@ Live detection grid state. Polled every **3.5 s** by the frontend during an acti
 
 ### POST `/api/devices/{id}/move`
 
-Send a single move command to a device. The command is queued and picked up by the Jetson device via `GET /api/get-commands/{device_id}`.
+Send a single move command to a device. The command is queued in the legacy `DeviceCommand` table.
 
 **Auth required:** Yes
 
@@ -715,14 +742,39 @@ Send a single move command to a device. The command is queued and picked up by t
 { "message": "Move command queued", "command_id": 12 }
 ```
 
-**Response `400`:**
+---
+
+## 9. Device Control — Pending Upload
+
+These endpoints queue commands that trigger or cancel the History Data Upload Mode on the edge device (SRS Section 4a).
+
+### POST `/api/devices/{id}/pending-upload/start`
+
+Queue a `start_pending_upload` command for the edge device.
+
+**Auth required:** Yes
+
+**Response `201`:**
 ```json
-{ "message": "Invalid command. Valid values: ['forward', 'backward', 'left', 'right', 'stop']" }
+{ "message": "start_pending_upload queued" }
 ```
 
 ---
 
-## 9. Routes
+### POST `/api/devices/{id}/pending-upload/stop`
+
+Queue a `stop_pending_upload` command to cancel an in-progress pending upload on the edge device.
+
+**Auth required:** Yes
+
+**Response `201`:**
+```json
+{ "message": "stop_pending_upload queued" }
+```
+
+---
+
+## 10. Routes
 
 ### GET `/api/routes`
 
@@ -744,14 +796,16 @@ List all saved routes, optionally filtered by device.
     "name": "Perimeter Sweep",
     "device_id": 1,
     "instructions": [
-      { "command": "forward", "value": 200 },
-      { "command": "left",    "value": 90  },
-      { "command": "forward", "value": 200 }
+      { "type": "forward",    "value": 200 },
+      { "type": "turn_left",  "value": 90  },
+      { "type": "forward",    "value": 200 }
     ],
     "created_at": "2024-01-01T00:00:00+00:00"
   }
 ]
 ```
+
+> **Note:** Route instructions use `type` (`"forward"`, `"turn_left"`, `"turn_right"`) and `value` to match the edge device's expected format (SRS SR-28). The frontend UI may display these as `command`/`value` — ensure the frontend maps them to `type`/`value` before saving.
 
 ---
 
@@ -782,9 +836,9 @@ Create a new route.
   "name": "Perimeter Sweep",
   "device_id": 1,
   "instructions": [
-    { "command": "forward", "value": 200 },
-    { "command": "left",    "value": 90  },
-    { "command": "forward", "value": 200 }
+    { "type": "forward",    "value": 200 },
+    { "type": "turn_left",  "value": 90  },
+    { "type": "forward",    "value": 200 }
   ]
 }
 ```
@@ -824,23 +878,84 @@ Delete a route.
 
 ---
 
-## 10. Jetson Device Endpoints
+## 11. IoT Device Endpoints
 
-These endpoints are used by the Jetson Nano device, not the React frontend.
+These endpoints are called by the Jetson Nano edge device. They do **not** require a JWT token. Authentication is performed using `device_id` and `device_secret` in the request body (POST) or query parameters (GET). All paths are under the `/api/iot_device/` prefix, which matches `base_api_url` in the device's `config.json`.
+
+On authentication failure any of these endpoints returns:
+
+**Response `401`:**
+```json
+{ "message": "Unknown device or wrong secret" }
+```
 
 ---
 
-### POST `/api/login` *(legacy)*
+### GET `/api/iot_device/devicecheck`
 
-Identical to `POST /api/auth/login`. Kept for backward compatibility with existing Jetson firmware.
+Startup credential verification (SRS SR-09). The device calls this once at boot before entering the polling loop. Returns HTTP 200 if `device_id` and `device_secret` are valid; marks the device `status` as `"online"`.
+
+**Auth required:** No (uses `device_id` + `device_secret` query params)
+
+**Query params:**
+
+| Param | Type | Required |
+|-------|------|----------|
+| `device_id` | string | Yes |
+| `device_secret` | string | Yes |
+
+**Response `200`:**
+```json
+{ "message": "OK" }
+```
 
 ---
 
-### POST `/api/predictions`
+### POST `/api/iot_device/command`
 
-Submit a weed detection result including images. Automatically updates the active run's weed count, photos count, grid state, and creates a detection log entry.
+Command polling endpoint (SRS SR-13). The device calls this every 2 seconds. Returns the oldest unconsumed IoT command and marks it consumed, or `null` if no command is pending.
 
-**Auth required:** Yes (JWT)
+**Auth required:** No (uses body fields)
+
+**Request body:**
+```json
+{ "device_id": "jetson-nano-01", "device_secret": "..." }
+```
+
+**Response `200` — command pending:**
+```json
+{
+  "command": "start",
+  "payload": {
+    "mode": "B",
+    "job_id": 7,
+    "travel_distance_cm": 500
+  }
+}
+```
+
+**Response `200` — no pending command:**
+```json
+{ "command": null }
+```
+
+**Possible `command` values:**
+
+| Value | Payload | Description |
+|-------|---------|-------------|
+| `"start"` | `{ mode, job_id, travel_distance_cm }` or `{ mode, job_id, route_name }` | Begin a detection run |
+| `"stop"` | _(none)_ | Abort the active run |
+| `"update"` | `{ confidence_threshold?, camera_vision_width_cm? }` | Update device settings |
+| `"start_pending_upload"` | _(none)_ | Begin uploading files from `pending_uploads_dir` |
+| `"stop_pending_upload"` | _(none)_ | Cancel an in-progress pending upload |
+
+---
+
+### POST `/api/iot_device/upload`
+
+Multipart image and detection data upload (SRS SR-38, SR-50). Called after each weed detection iteration and during History Data Upload Mode.
+
+**Auth required:** No (uses form fields)
 
 **Content-Type:** `multipart/form-data`
 
@@ -848,12 +963,216 @@ Submit a weed detection result including images. Automatically updates the activ
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `deviceID` | string | Yes | Device string ID (e.g. `"AB01"`) |
-| `timestamp` | string | Yes | ISO 8601 datetime |
-| `position_in_field` | string | Yes | Cell position in `"row,col"` format (e.g. `"2,3"`) |
-| `prediction_text` | string | Yes | Detected species name |
-| `original_image` | file | Yes | Original photo |
-| `annotated_image` | file | Yes | Annotated photo with detection overlay |
+| `device_id` | string | Yes | Device identifier |
+| `device_secret` | string | Yes | Device secret |
+| `job_id` | string | Yes | Run ID this upload belongs to |
+| `step_index` | string | Yes | Zero-based step counter for this iteration |
+| `raw_image` | file | Yes | Raw camera photo (`{stem}_raw.jpg`) |
+| `annotated_image` | file | Yes | Annotated photo with bounding boxes (`{stem}_annotated.jpg`) |
+| `detection_json` | file | No | Detection metadata JSON (`{stem}.json`) — contains `detections` array with `label` and `confidence` per object |
+
+**Response `200`:**
+```json
+{ "message": "Upload received" }
+```
+
+---
+
+### POST `/api/iot_device/completed`
+
+Job completion or abort notification (SRS SR-26, SR-31). Called by the device when a Mode B or Mode C run finishes or is aborted.
+
+**Auth required:** No (uses body fields)
+
+**Request body — completed:**
+```json
+{
+  "device_id": "jetson-nano-01",
+  "device_secret": "...",
+  "job_id": 7,
+  "status": "completed",
+  "total_distance_cm": 500
+}
+```
+
+**Request body — aborted:**
+```json
+{
+  "device_id": "jetson-nano-01",
+  "device_secret": "...",
+  "job_id": 7,
+  "status": "aborted",
+  "reason": "stopped",
+  "total_distance_cm": 250
+}
+```
+
+| Field | Type | Values |
+|-------|------|--------|
+| `status` | string | `"completed"` \| `"aborted"` |
+| `reason` | string | `"timeout"` \| `"err"` \| `"stopped"` (only when `status` is `"aborted"`) |
+
+**Response `200`:**
+```json
+{ "message": "Completion recorded" }
+```
+
+---
+
+### POST `/api/iot_device/settings/status`
+
+Settings update acknowledgement (SRS SR-17). The device calls this after applying (or failing to apply) an `update` command.
+
+**Auth required:** No (uses body fields)
+
+**Request body — success:**
+```json
+{
+  "device_id": "jetson-nano-01",
+  "device_secret": "...",
+  "status": "success",
+  "applied": ["confidence_threshold"]
+}
+```
+
+**Request body — partial:**
+```json
+{
+  "device_id": "jetson-nano-01",
+  "device_secret": "...",
+  "status": "partial",
+  "applied": ["confidence_threshold"],
+  "failed": [{ "field": "camera_vision_width_cm", "reason": "wds_active" }]
+}
+```
+
+**Request body — failed:**
+```json
+{
+  "device_id": "jetson-nano-01",
+  "device_secret": "...",
+  "status": "failed",
+  "failed": [{ "field": "confidence_threshold", "reason": "validation_error" }]
+}
+```
+
+| `status` | Meaning |
+|----------|---------|
+| `"success"` | All fields applied |
+| `"partial"` | Some fields applied, some blocked |
+| `"failed"` | No fields applied |
+
+`"reason"` values in `failed` entries: `"validation_error"`, `"wds_active"`, `"unrecognised_field"`, `"disk_write_error"`
+
+**Response `200`:**
+```json
+{ "message": "Settings status received", "status": "success" }
+```
+
+---
+
+### POST `/api/iot_device/device/state`
+
+Device state change notification (SRS SR-49, SR-51). Called when the device enters or exits a special mode.
+
+**Auth required:** No (uses body fields)
+
+**Request body:**
+```json
+{
+  "device_id": "jetson-nano-01",
+  "device_secret": "...",
+  "state": "pending_upload"
+}
+```
+
+| `state` | Meaning |
+|---------|---------|
+| `"idle"` | Device is idle, ready for commands |
+| `"working"` | Device is executing a detection job |
+| `"pending_upload"` | Device is in History Data Upload Mode |
+
+**Response `200`:**
+```json
+{ "message": "State updated" }
+```
+
+---
+
+### POST `/api/iot_device/history/completed`
+
+History (pending) upload completion summary (SRS SR-51). Called when the device finishes processing all bundles in `pending_uploads_dir`.
+
+**Auth required:** No (uses body fields)
+
+**Request body:**
+```json
+{
+  "device_id": "jetson-nano-01",
+  "device_secret": "...",
+  "succeeded": 5,
+  "failed": 1
+}
+```
+
+**Response `200`:**
+```json
+{ "message": "History upload summary received" }
+```
+
+---
+
+### GET `/api/iot_device/route`
+
+Fetch route steps by name for Mode C (SRS SR-27a).
+
+**Auth required:** No (uses `device_id` + `device_secret` query params)
+
+**Query params:**
+
+| Param | Type | Required |
+|-------|------|----------|
+| `device_id` | string | Yes |
+| `device_secret` | string | Yes |
+| `route_name` | string | Yes |
+
+**Response `200`:**
+```json
+{
+  "steps": [
+    { "type": "forward",    "value": 200 },
+    { "type": "turn_left",  "value": 90  },
+    { "type": "forward",    "value": 200 }
+  ]
+}
+```
+
+**Response `404`:**
+```json
+{ "message": "Route not found" }
+```
+
+---
+
+## 12. Legacy Endpoints
+
+These endpoints are kept for backward compatibility.
+
+### POST `/api/login`
+
+Identical to `POST /api/auth/login`.
+
+---
+
+### POST `/api/predictions`
+
+Submit a weed detection result using the old JWT-authenticated format. Prefer `POST /api/iot_device/upload` for new firmware.
+
+**Auth required:** Yes (JWT)
+
+**Content-Type:** `multipart/form-data`
+
+**Form fields:** `deviceID`, `timestamp` (ISO 8601), `position_in_field` (`"row,col"`), `prediction_text`, `original_image` (file), `annotated_image` (file)
 
 **Response `201`:**
 ```json
@@ -864,71 +1183,40 @@ Submit a weed detection result including images. Automatically updates the activ
 
 ### GET `/api/get-commands/{device_id}`
 
-Poll for the next pending move command. Returns and marks the oldest pending command as executed.
+Poll for the next pending move command (legacy integer format). Prefer `POST /api/iot_device/command` for new firmware.
 
-**Auth required:** Yes
+**Auth required:** Yes (JWT)
 
-**Path params:**
-
-| Param | Description |
-|-------|-------------|
-| `device_id` | Device string ID (e.g. `"AB01"`) |
-
-**Response `200` — command available:**
+**Response `200`:**
 ```json
 {
   "message": "Command retrieved",
-  "command": {
-    "id": 5,
-    "command_value": 0,
-    "timestamp": "2024-01-01T09:00:00+00:00"
-  }
+  "command": { "id": 5, "command_value": 0, "timestamp": "2024-01-01T09:00:00+00:00" }
 }
 ```
 
-**Command value mapping:**
-
-| Value | Action |
-|-------|--------|
-| `0` | Forward |
-| `1` | Backward |
-| `2` | Right |
-| `3` | Left |
-| `4` | Stop |
-
-**Response `200` — no pending commands:**
-```json
-{ "message": "No pending commands", "command": null }
-```
+Command value mapping: `0` = Forward, `1` = Backward, `2` = Right, `3` = Left, `4` = Stop
 
 ---
 
-### POST `/api/send-command` *(legacy)*
+### POST `/api/send-command`
 
-Queue a command using the legacy integer-based format. Prefer `POST /api/devices/{id}/move` for new integrations.
+Queue a command using the legacy integer-based format.
 
-**Auth required:** Yes
+**Auth required:** Yes (JWT)
 
-**Request body:**
-```json
-{ "deviceID": "AB01", "command_value": 0 }
-```
-
-**Response `201`:**
-```json
-{ "message": "Command queued successfully", "command_id": 5 }
-```
+**Request body:** `{ "deviceID": "AB01", "command_value": 0 }`
 
 ---
 
-## 11. Error Responses
+## 13. Error Responses
 
 All error responses return JSON with a `message` field.
 
 | Status | Meaning |
 |--------|---------|
 | `400` | Bad request — missing or invalid parameters |
-| `401` | Unauthorized — missing or invalid token |
+| `401` | Unauthorized — missing/invalid JWT token, or unknown device/wrong secret (IoT endpoints) |
 | `404` | Resource not found |
 | `409` | Conflict — duplicate name or device already running |
 
@@ -938,7 +1226,7 @@ All error responses return JSON with a `message` field.
 
 ---
 
-## 12. Data Models
+## 14. Data Models
 
 ### Field
 ```json
@@ -964,8 +1252,10 @@ All error responses return JSON with a `message` field.
   "serial_baud_rate": 115200,
   "camera_index": 0,
   "confidence_threshold": 0.75,
+  "camera_vision_width_cm": 50,
   "status": "online",
   "working": false,
+  "state": "idle",
   "created_at": "2024-01-01T00:00:00+00:00"
 }
 ```
@@ -1002,10 +1292,25 @@ All error responses return JSON with a `message` field.
   "name": "Perimeter Sweep",
   "device_id": 1,
   "instructions": [
-    { "command": "forward", "value": 200 },
-    { "command": "left",    "value": 90  },
-    { "command": "forward", "value": 200 }
+    { "type": "forward",    "value": 200 },
+    { "type": "turn_left",  "value": 90  },
+    { "type": "forward",    "value": 200 }
   ],
   "created_at": "2024-01-01T00:00:00+00:00"
+}
+```
+
+### IoT Command (internal)
+
+Stored in the `iot_commands` table. Created by the backend when the frontend triggers a detection start/stop or settings update; consumed by the edge device via `POST /api/iot_device/command`.
+
+```json
+{
+  "id": 1,
+  "device_id": "jetson-nano-01",
+  "command": "start",
+  "payload": { "mode": "B", "job_id": 7, "travel_distance_cm": 500 },
+  "status": "pending",
+  "created_at": "2024-01-01T09:00:00+00:00"
 }
 ```

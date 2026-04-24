@@ -1,213 +1,19 @@
 import os
 import json
 from flask import Blueprint, request, jsonify, current_app
-from flask_sqlalchemy import SQLAlchemy
-from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity
+from flask_jwt_extended import create_access_token, jwt_required, get_jwt_identity
 from werkzeug.utils import secure_filename
 from datetime import datetime, timezone, timedelta
 from sqlalchemy import func
 
-# Initialize extensions (they will be bound to the app in main.py)
-db = SQLAlchemy()
-jwt = JWTManager()
+from models import (
+    db, jwt, User, Field, Device, Route, Run, DetectionLog,
+    DeviceCommand, PredictionRecord, CommandQueue, IoTCommand,
+    TokenBlocklist, WeedDetection
+)
 
 # Create a Blueprint for our API routes
 api_bp = Blueprint('api', __name__)
-
-
-# ---------------------------------------------------------------------------
-# Database Models
-# ---------------------------------------------------------------------------
-
-class User(db.Model):
-    __tablename__ = 'users'
-    id = db.Column(db.Integer, primary_key=True)
-    username = db.Column(db.String(80), unique=True, nullable=False)
-    password = db.Column(db.String(120), nullable=False)
-
-
-class Field(db.Model):
-    __tablename__ = 'fields'
-    id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(100), nullable=False)
-    width = db.Column(db.Integer, nullable=False)
-    height = db.Column(db.Integer, nullable=False)
-    partition_type = db.Column(db.String(50), default='grid')
-    partition_count = db.Column(db.Integer, default=0)
-    created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
-
-    def to_dict(self):
-        return {
-            'id': self.id,
-            'name': self.name,
-            'width': self.width,
-            'height': self.height,
-            'partition_type': self.partition_type,
-            'partition_count': self.partition_count,
-            'created_at': self.created_at.isoformat() if self.created_at else None,
-        }
-
-
-class Device(db.Model):
-    __tablename__ = 'devices'
-    id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(100), unique=True, nullable=False)
-    device_id = db.Column(db.String(50), unique=True, nullable=False)
-    server_url = db.Column(db.String(255))
-    serial_port = db.Column(db.String(100))
-    serial_baud_rate = db.Column(db.Integer, default=115200)
-    camera_index = db.Column(db.Integer, default=0)
-    confidence_threshold = db.Column(db.Float, default=0.75)
-    status = db.Column(db.String(20), default='offline')   # online | offline
-    working = db.Column(db.Boolean, default=False)
-    created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
-
-    def to_dict(self, include_settings=False):
-        d = {
-            'id': self.id,
-            'name': self.name,
-            'device_id': self.device_id,
-            'server_url': self.server_url,
-            'status': self.status,
-            'working': self.working,
-            'created_at': self.created_at.isoformat() if self.created_at else None,
-        }
-        if include_settings:
-            d.update({
-                'serial_port': self.serial_port,
-                'serial_baud_rate': self.serial_baud_rate,
-                'camera_index': self.camera_index,
-                'confidence_threshold': self.confidence_threshold,
-            })
-        return d
-
-    def settings_dict(self):
-        return {
-            'server_url': self.server_url,
-            'serial_port': self.serial_port,
-            'serial_baud_rate': self.serial_baud_rate,
-            'camera_index': self.camera_index,
-            'confidence_threshold': self.confidence_threshold,
-        }
-
-
-class Route(db.Model):
-    __tablename__ = 'routes'
-    id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(100), nullable=False)
-    device_id = db.Column(db.Integer, db.ForeignKey('devices.id'), nullable=False)
-    instructions_json = db.Column(db.Text, default='[]')
-    created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
-
-    def to_dict(self):
-        return {
-            'id': self.id,
-            'name': self.name,
-            'device_id': self.device_id,
-            'instructions': json.loads(self.instructions_json or '[]'),
-            'created_at': self.created_at.isoformat() if self.created_at else None,
-        }
-
-
-class Run(db.Model):
-    __tablename__ = 'runs'
-    id = db.Column(db.Integer, primary_key=True)
-    device_id = db.Column(db.String(50), nullable=False)   # device_id string (AB01)
-    device_db_id = db.Column(db.Integer, db.ForeignKey('devices.id'))
-    field_id = db.Column(db.Integer, db.ForeignKey('fields.id'))
-    mode = db.Column(db.String(20), default='grid')        # grid | route
-    status = db.Column(db.String(20), default='running')   # running | finished | stopped
-    started_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
-    finished_at = db.Column(db.DateTime(timezone=True))
-    stopped_at = db.Column(db.DateTime(timezone=True))
-    total_weeds = db.Column(db.Integer, default=0)
-    total_photos = db.Column(db.Integer, default=0)
-    # Grid detection metadata
-    grid_x = db.Column(db.Integer, default=0)
-    grid_y = db.Column(db.Integer, default=0)
-    grid_distance = db.Column(db.Integer, default=0)
-    cells_scanned = db.Column(db.Integer, default=0)
-    grid_state_json = db.Column(db.Text)   # JSON 2D array of weed counts
-
-    def cells_total(self):
-        return self.grid_x * self.grid_y
-
-    def to_dict(self):
-        return {
-            'id': self.id,
-            'device_id': self.device_id,
-            'field_id': self.field_id,
-            'mode': self.mode,
-            'started_at': self.started_at.isoformat() if self.started_at else None,
-            'finished_at': self.finished_at.isoformat() if self.finished_at else None,
-            'total_weeds': self.total_weeds,
-        }
-
-    def _init_grid(self):
-        """Initialise an empty grid if not set."""
-        if not self.grid_state_json and self.grid_x and self.grid_y:
-            self.grid_state_json = json.dumps(
-                [[0] * self.grid_x for _ in range(self.grid_y)]
-            )
-
-    def get_grid(self):
-        if not self.grid_state_json:
-            self._init_grid()
-        return json.loads(self.grid_state_json or '[]')
-
-    def set_grid(self, grid):
-        self.grid_state_json = json.dumps(grid)
-
-
-class DetectionLog(db.Model):
-    __tablename__ = 'detection_logs'
-    id = db.Column(db.Integer, primary_key=True)
-    run_id = db.Column(db.Integer, db.ForeignKey('runs.id'), nullable=False)
-    timestamp = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
-    species = db.Column(db.String(100))
-    confidence = db.Column(db.Float, default=0.0)
-    cell = db.Column(db.String(20))           # e.g. "A3" or "1,2"
-    photo_url = db.Column(db.String(255))
-
-    def to_dict(self):
-        return {
-            'id': self.id,
-            'timestamp': self.timestamp.isoformat() if self.timestamp else None,
-            'species': self.species,
-            'confidence': self.confidence,
-            'cell': self.cell,
-            'photo_url': self.photo_url,
-        }
-
-
-# Legacy models kept for Jetson-facing endpoints
-class DeviceCommand(db.Model):
-    __tablename__ = 'device_commands'
-    id = db.Column(db.Integer, primary_key=True)
-    device_id = db.Column(db.String(50), nullable=False, index=True)
-    command_value = db.Column(db.Integer, nullable=False)
-    status = db.Column(db.String(20), default='pending', nullable=False)
-    timestamp = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
-
-
-class PredictionRecord(db.Model):
-    __tablename__ = 'predictionbs_history'
-    id = db.Column(db.Integer, primary_key=True)
-    device_id = db.Column(db.String(50), nullable=False)
-    timestamp = db.Column(db.DateTime, nullable=False)
-    position_in_field = db.Column(db.String(100), nullable=False)
-    prediction_text = db.Column(db.Text, nullable=False)
-    original_image_path = db.Column(db.String(255), nullable=False)
-    annotated_image_path = db.Column(db.String(255), nullable=False)
-
-
-class CommandQueue(db.Model):
-    __tablename__ = 'command_queue'
-    id = db.Column(db.Integer, primary_key=True)
-    device_id = db.Column(db.String(50), nullable=False, index=True)
-    command_name = db.Column(db.String(50), nullable=False)
-    status = db.Column(db.String(20), default='pending')
-    timestamp = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
 
 
 # ---------------------------------------------------------------------------
@@ -219,6 +25,26 @@ def _get_device_or_404(device_id):
     if not device:
         return None, jsonify({'message': 'Device not found'}), 404
     return device, None, None
+
+
+def _auth_iot_device():
+    """Authenticate an edge device request using device_id + device_secret.
+
+    Reads from JSON body (POST) or query params (GET).
+    Returns (device, None) on success or (None, error_response) on failure.
+    """
+    if request.method == 'GET':
+        device_id = request.args.get('device_id', '')
+        device_secret = request.args.get('device_secret', '')
+    else:
+        data = request.get_json(silent=True) or {}
+        device_id = data.get('device_id', '')
+        device_secret = data.get('device_secret', '')
+
+    device = Device.query.filter_by(device_id=device_id).first()
+    if not device or device.device_secret != device_secret:
+        return None, (jsonify({'message': 'Unknown device or wrong secret'}), 401)
+    return device, None
 
 
 def _duration_str(started_at, ended_at):
@@ -297,15 +123,15 @@ def create_field():
     data = request.get_json() or {}
     name = data.get('name')
     width = data.get('width')
-    height = data.get('height')
-    if not name or width is None or height is None:
-        return jsonify({'message': 'name, width, and height are required'}), 400
+    length = data.get('length')
+    if not name or width is None or length is None:
+        return jsonify({'message': 'name, width, and length are required'}), 400
     field = Field(
         name=name,
         width=int(width),
-        height=int(height),
+        length=int(length),
         partition_type=data.get('partition_type', 'grid'),
-        partition_count=data.get('partition_count', int(width) * int(height)),
+        partition_count=data.get('partition_count', int(width) * int(length)),
     )
     db.session.add(field)
     db.session.commit()
@@ -319,7 +145,7 @@ def update_field(field_id):
     if not field:
         return jsonify({'message': 'Field not found'}), 404
     data = request.get_json() or {}
-    for attr in ('name', 'width', 'height', 'partition_type', 'partition_count'):
+    for attr in ('name', 'width', 'length', 'partition_type', 'partition_count'):
         if attr in data:
             setattr(field, attr, data[attr])
     db.session.commit()
@@ -382,11 +208,13 @@ def create_device():
     device = Device(
         name=name,
         device_id=device_id_str,
+        device_secret=data.get('device_secret', ''),
         server_url=data.get('server_url'),
         serial_port=data.get('serial_port'),
         serial_baud_rate=data.get('serial_baud_rate', 115200),
         camera_index=data.get('camera_index', 0),
         confidence_threshold=data.get('confidence_threshold', 0.75),
+        camera_vision_width_cm=data.get('camera_vision_width_cm', 50),
     )
     db.session.add(device)
     db.session.commit()
@@ -444,9 +272,21 @@ def update_device_settings(device_id):
     if not device:
         return jsonify({'message': 'Device not found'}), 404
     data = request.get_json() or {}
-    for attr in ('server_url', 'serial_port', 'serial_baud_rate', 'camera_index', 'confidence_threshold'):
+    for attr in ('server_url', 'serial_port', 'serial_baud_rate', 'camera_index',
+                 'confidence_threshold', 'camera_vision_width_cm', 'device_secret'):
         if attr in data:
             setattr(device, attr, data[attr])
+
+    # Queue an update command for the edge device with the remotely-updatable fields
+    iot_update_payload = {k: data[k] for k in ('confidence_threshold', 'camera_vision_width_cm') if k in data}
+    if iot_update_payload:
+        iot_cmd = IoTCommand(
+            device_id=device.device_id,
+            command='update',
+            payload_json=json.dumps(iot_update_payload),
+        )
+        db.session.add(iot_cmd)
+
     db.session.commit()
     return jsonify(device.settings_dict()), 200
 
@@ -622,7 +462,8 @@ def run_detection_logs(run_id):
         return jsonify({'message': 'Run not found'}), 404
     page = request.args.get('page', 1, type=int)
     limit = request.args.get('limit', 10, type=int)
-    q = DetectionLog.query.filter_by(run_id=run_id).order_by(DetectionLog.timestamp.asc())
+    # Per DEVELOPER_REFERENCE, this should return richer log data from WeedDetection
+    q = WeedDetection.query.filter_by(run_id=run_id).order_by(WeedDetection.detected_at.asc())
     total = q.count()
     logs = q.offset((page - 1) * limit).limit(limit).all()
     return jsonify({'total': total, 'logs': [l.to_dict() for l in logs]}), 200
@@ -670,6 +511,30 @@ def detection_start(device_id):
 
     db.session.add(run)
     device.working = True
+    db.session.flush()   # populate run.id before building the IoT command payload
+
+    if mode == 'grid':
+        iot_payload = {
+            'mode': 'B',
+            'job_id': run.id,
+            'travel_distance_cm': run.grid_distance,
+        }
+    elif mode == 'route':
+        route_obj = db.session.get(Route, data.get('route_id'))
+        iot_payload = {
+            'mode': 'C',
+            'job_id': run.id,
+            'route_name': route_obj.name if route_obj else '',
+        }
+    else:
+        iot_payload = {'mode': mode, 'job_id': run.id}
+
+    iot_cmd = IoTCommand(
+        device_id=device.device_id,
+        command='start',
+        payload_json=json.dumps(iot_payload),
+    )
+    db.session.add(iot_cmd)
     db.session.commit()
     return jsonify({'message': 'Detection started', 'run_id': run.id}), 201
 
@@ -682,10 +547,14 @@ def detection_stop(device_id):
         return jsonify({'message': 'Device not found'}), 404
     run = Run.query.filter_by(device_db_id=device_id, status='running').order_by(Run.started_at.desc()).first()
     if not run:
-        return jsonify({'message': 'No active run found for this device'}), 404
+        device.working = False
+        db.session.commit()
+        return jsonify({'message': 'No active run to stop'}), 200
     run.status = 'stopped'
     run.stopped_at = datetime.now(timezone.utc)
     device.working = False
+    iot_cmd = IoTCommand(device_id=device.device_id, command='stop', payload_json='{}')
+    db.session.add(iot_cmd)
     db.session.commit()
     return jsonify({'message': 'Detection stopped', 'run_id': run.id}), 200
 
@@ -725,6 +594,32 @@ def detection_grid(device_id):
 # ---------------------------------------------------------------------------
 # Device Control — Manual Movement Endpoint
 # ---------------------------------------------------------------------------
+
+@api_bp.route('/api/devices/<int:device_id>/pending-upload/start', methods=['POST'])
+@jwt_required()
+def pending_upload_start(device_id):
+    """Queue a start_pending_upload command for the edge device."""
+    device = db.session.get(Device, device_id)
+    if not device:
+        return jsonify({'message': 'Device not found'}), 404
+    iot_cmd = IoTCommand(device_id=device.device_id, command='start_pending_upload', payload_json='{}')
+    db.session.add(iot_cmd)
+    db.session.commit()
+    return jsonify({'message': 'start_pending_upload queued'}), 201
+
+
+@api_bp.route('/api/devices/<int:device_id>/pending-upload/stop', methods=['POST'])
+@jwt_required()
+def pending_upload_stop(device_id):
+    """Queue a stop_pending_upload command for the edge device."""
+    device = db.session.get(Device, device_id)
+    if not device:
+        return jsonify({'message': 'Device not found'}), 404
+    iot_cmd = IoTCommand(device_id=device.device_id, command='stop_pending_upload', payload_json='{}')
+    db.session.add(iot_cmd)
+    db.session.commit()
+    return jsonify({'message': 'stop_pending_upload queued'}), 201
+
 
 @api_bp.route('/api/devices/<int:device_id>/move', methods=['POST'])
 @jwt_required()
@@ -930,3 +825,248 @@ def send_command():
     db.session.add(new_cmd)
     db.session.commit()
     return jsonify({'message': 'Command queued successfully', 'command_id': new_cmd.id}), 201
+
+
+# ---------------------------------------------------------------------------
+# IoT Device Endpoints  (/api/iot_device/...)
+# Auth: device_id + device_secret in request body (POST) or query params (GET)
+# ---------------------------------------------------------------------------
+
+@api_bp.route('/api/iot_device/devicecheck', methods=['GET'])
+def iot_devicecheck():
+    """SR-09: Startup credential verification. Returns 200 if device_id + device_secret are valid."""
+    device, err = _auth_iot_device()
+    if err:
+        return err
+    device.status = 'online'
+    db.session.commit()
+    return jsonify({'message': 'OK'}), 200
+
+
+@api_bp.route('/api/iot_device/disconnect', methods=['POST'])
+def iot_disconnect():
+    """Called by edge device on graceful shutdown to mark itself offline."""
+    device, err = _auth_iot_device()
+    if err:
+        return err
+    device.status = 'offline'
+    device.working = False
+    device.state = 'idle'
+    db.session.commit()
+    return jsonify({'message': 'OK'}), 200
+
+
+@api_bp.route('/api/iot_device/command', methods=['POST'])
+def iot_command_poll():
+    """SR-13: Command polling. Returns the next pending IoT command or null."""
+    device, err = _auth_iot_device()
+    if err:
+        return err
+
+    cmd = IoTCommand.query.filter_by(
+        device_id=device.device_id, status='pending'
+    ).order_by(IoTCommand.created_at.asc()).first()
+
+    if not cmd:
+        return jsonify({'command': None}), 200
+
+    cmd.status = 'consumed'
+    db.session.commit()
+
+    payload = json.loads(cmd.payload_json or '{}')
+    response = {'command': cmd.command}
+    if payload:
+        response['payload'] = payload
+    return jsonify(response), 200
+
+
+@api_bp.route('/api/iot_device/upload', methods=['POST'])
+def iot_upload():
+    """SR-38/SR-50: Multipart upload of raw image, annotated image, and detection JSON."""
+    device_id_str = request.form.get('device_id', '')
+    device_secret = request.form.get('device_secret', '')
+    device = Device.query.filter_by(device_id=device_id_str).first()
+    if not device or device.device_secret != device_secret:
+        return jsonify({'message': 'Unknown device or wrong secret'}), 401
+
+    job_id = request.form.get('job_id')
+    step_index = request.form.get('step_index')
+    if job_id is None or step_index is None:
+        return jsonify({'message': 'job_id and step_index are required'}), 400
+
+    if 'raw_image' not in request.files or 'annotated_image' not in request.files:
+        return jsonify({'message': 'raw_image and annotated_image files are required'}), 400
+
+    raw_file = request.files['raw_image']
+    ann_file = request.files['annotated_image']
+    stem = f'{device_id_str}_job{job_id}_step{step_index}'
+    raw_path = os.path.join(current_app.config['UPLOAD_FOLDER'], secure_filename(f'{stem}_raw.jpg'))
+    ann_path = os.path.join(current_app.config['UPLOAD_FOLDER'], secure_filename(f'{stem}_annotated.jpg'))
+    raw_file.save(raw_path)
+    ann_file.save(ann_path)
+
+    # Parse detection data from uploaded JSON file or form field
+    detections = []
+    if 'detection_json' in request.files:
+        try:
+            det_data = json.load(request.files['detection_json'])
+            detections = det_data.get('detections', [])
+        except (json.JSONDecodeError, Exception):
+            pass
+
+    # Update active run
+    run = Run.query.filter_by(id=int(job_id), status='running').first()
+    if run:
+        run.total_photos += 1
+        weed_count = len(detections)
+        run.total_weeds += weed_count
+        if weed_count > 0:
+            run.cells_scanned += 1
+
+        # Calculate grid position from step_index for grid mode runs
+        grid_x, grid_y = None, None
+        if run.mode == 'grid' and run.grid_x and run.grid_x > 0:
+            try:
+                step = int(step_index)
+                grid_y = step // run.grid_x
+                grid_x = step % run.grid_x
+            except (ValueError, TypeError):
+                pass  # grid_x/y will remain None
+
+        for det in detections:
+            wd = WeedDetection(
+                run_id=run.id,
+                field_id=run.field_id,
+                grid_x=grid_x,
+                grid_y=grid_y,
+                species=det.get('label', 'weed'),
+                original_image_path=raw_path,
+                annotated_image_path=ann_path,
+            )
+            db.session.add(wd)
+        db.session.commit()
+
+    return jsonify({'message': 'Upload received'}), 200
+
+
+@api_bp.route('/api/iot_device/completed', methods=['POST'])
+def iot_completed():
+    """SR-26/SR-31: Job completion or abort notification from the device."""
+    device, err = _auth_iot_device()
+    if err:
+        return err
+
+    data = request.get_json(silent=True) or {}
+    job_id = data.get('job_id')
+    status = data.get('status')   # completed | aborted
+    total_distance_cm = data.get('total_distance_cm', 0)
+    reason = data.get('reason')   # timeout | err | stopped (only on aborted)
+
+    if not job_id or status not in ('completed', 'aborted'):
+        return jsonify({'message': 'job_id and status (completed|aborted) are required'}), 400
+
+    run = db.session.get(Run, int(job_id))
+    if not run:
+        return jsonify({'message': 'Run not found'}), 404
+
+    now = datetime.now(timezone.utc)
+    if status == 'completed':
+        run.status = 'finished'
+        run.finished_at = now
+    else:
+        run.status = 'stopped'
+        run.stopped_at = now
+
+    run.grid_distance = total_distance_cm
+    device.working = False
+    device.state = 'idle'
+    db.session.commit()
+
+    return jsonify({'message': 'Completion recorded'}), 200
+
+
+@api_bp.route('/api/iot_device/settings/status', methods=['POST'])
+def iot_settings_status():
+    """SR-17: Settings update acknowledgement from the device."""
+    device, err = _auth_iot_device()
+    if err:
+        return err
+
+    data = request.get_json(silent=True) or {}
+    status = data.get('status')   # success | partial | failed
+    applied = data.get('applied', [])
+    failed = data.get('failed', [])
+
+    # Apply confirmed settings back to the Device record so the dashboard stays in sync
+    if status in ('success', 'partial'):
+        if 'confidence_threshold' in applied:
+            val = next(
+                (v for k, v in data.items() if k == 'confidence_threshold'), None
+            )
+            # Value not echoed back by device; rely on the device having stored it.
+            # Mirror only the fields the device confirmed applied.
+            pass
+        db.session.commit()
+
+    return jsonify({'message': 'Settings status received', 'status': status}), 200
+
+
+@api_bp.route('/api/iot_device/device/state', methods=['POST'])
+def iot_device_state():
+    """SR-49/SR-51: Device state change notification (idle | pending_upload | working)."""
+    device, err = _auth_iot_device()
+    if err:
+        return err
+
+    data = request.get_json(silent=True) or {}
+    state = data.get('state')
+    if state not in ('idle', 'pending_upload', 'working'):
+        return jsonify({'message': 'state must be idle, pending_upload, or working'}), 400
+
+    device.state = state
+    if state == 'idle':
+        device.working = False
+    elif state == 'working':
+        device.working = True
+    db.session.commit()
+
+    return jsonify({'message': 'State updated'}), 200
+
+
+@api_bp.route('/api/iot_device/history/completed', methods=['POST'])
+def iot_history_completed():
+    """SR-51: History (pending) upload completion summary from the device."""
+    device, err = _auth_iot_device()
+    if err:
+        return err
+
+    data = request.get_json(silent=True) or {}
+    succeeded = data.get('succeeded', 0)
+    failed = data.get('failed', 0)
+
+    # Log the result; the device will follow up with a state:idle notification.
+    current_app.logger.info(
+        'History upload completed for %s: succeeded=%s failed=%s',
+        device.device_id, succeeded, failed,
+    )
+
+    return jsonify({'message': 'History upload summary received'}), 200
+
+
+@api_bp.route('/api/iot_device/route', methods=['GET'])
+def iot_get_route():
+    """SR-27a: Fetch route steps by route_name for Mode C."""
+    device, err = _auth_iot_device()
+    if err:
+        return err
+
+    route_name = request.args.get('route_name', '').strip()
+    if not route_name:
+        return jsonify({'message': 'route_name query param is required'}), 400
+
+    route = Route.query.filter_by(name=route_name, device_id=device.id).first()
+    if not route:
+        return jsonify({'message': 'Route not found'}), 404
+
+    steps = json.loads(route.instructions_json or '[]')
+    return jsonify({'steps': steps}), 200

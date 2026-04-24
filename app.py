@@ -1,41 +1,46 @@
 import os
-
-from flask_cors import CORS
+from datetime import timedelta
 from flask import Flask
-# Import the blueprint, extensions, and models from api.py
-from api import api_bp, db, jwt, User, Field, Device, Route, Run, DetectionLog, DeviceCommand, PredictionRecord, CommandQueue
+from flask_cors import CORS
+from flask_migrate import Migrate
+from models import db, jwt, User
+from api import api_bp
+from routes.media import media_bp
 
 app = Flask(__name__)
-# Enable CORS so  React frontend can communicate with this API
-CORS(app)
+CORS(
+    app,
+    resources={r"/api/*": {"origins": "*"}},
+    allow_headers=["Content-Type", "Authorization"],
+    methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    supports_credentials=False,
+)
+
 # --- Configuration ---
 app.config['SQLALCHEMY_DATABASE_URI'] = 'postgresql://agribot-admin:1234@localhost:5432/agribot'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['JWT_SECRET_KEY'] = 'your-super-secret-jwt-key'
+app.config['JWT_ACCESS_TOKEN_EXPIRES'] = timedelta(hours=24)
 
 UPLOAD_FOLDER = 'uploads'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
 # --- Initialize Extensions ---
-# This binds the db and jwt instances from api.py to this specific Flask app
 db.init_app(app)
 jwt.init_app(app)
+migrate = Migrate(app, db)
 
 # --- Register Blueprints ---
-# This tells Flask about all the routes you defined in api.py
 app.register_blueprint(api_bp)
+app.register_blueprint(media_bp)
 
 if __name__ == '__main__':
-    # Initialize the database tables before running
     with app.app_context():
         db.create_all()
 
-        # Create a dummy user for testing if the table is empty
         if not User.query.first():
-            test_user = User(username="guest", password="guest1234")
-            db.session.add(test_user)
+            db.session.add(User(username="guest", password="guest1234"))
             db.session.commit()
 
-    # Run the server
     app.run(debug=True, host='0.0.0.0', port=5000)

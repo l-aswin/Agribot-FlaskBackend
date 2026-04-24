@@ -353,10 +353,11 @@ All data is fetched in parallel on mount using `Promise.allSettled`.
   "logs": [
     {
       "id": 1,
-      "timestamp": "2024-01-01T09:05:00Z",
+      "grid_pos": "A3",
+      "original_url": "https://example.com/path/to/original.jpg",
+      "annotated_url": "https://example.com/path/to/annotated.jpg",
       "species": "Dandelion",
-      "confidence": 0.95,
-      "cell": "A3"
+      "timestamp": "2024-01-01T09:05:00Z"
     }
   ]
 }
@@ -697,11 +698,11 @@ All endpoints are prefixed with the base URL (`VITE_API_BASE_URL`, default `http
 {
   "id": 1,
   "run_id": 1,
-  "timestamp": "2024-01-01T09:05:00Z",
+  "grid_pos": "A3",
+  "original_url": "/photos/run1/A3_original.jpg",
+  "annotated_url": "/photos/run1/A3_annotated.jpg",
   "species": "Dandelion",
-  "confidence": 0.95,
-  "cell": "A3",
-  "photo_url": "/photos/run1/A3_001.jpg"
+  "timestamp": "2024-01-01T09:05:00Z"
 }
 ```
 
