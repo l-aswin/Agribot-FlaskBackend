@@ -1,8 +1,10 @@
 import os
 from flask import Flask
 from flask_cors import CORS
+from flask_migrate import Migrate
 from models import db, jwt, User
-from routes import all_blueprints
+from api import api_bp
+from routes.media import media_bp
 
 app = Flask(__name__)
 CORS(app)
@@ -19,10 +21,11 @@ app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 # --- Initialize Extensions ---
 db.init_app(app)
 jwt.init_app(app)
+migrate = Migrate(app, db)
 
 # --- Register Blueprints ---
-for bp in all_blueprints:
-    app.register_blueprint(bp)
+app.register_blueprint(api_bp)
+app.register_blueprint(media_bp)
 
 if __name__ == '__main__':
     with app.app_context():
