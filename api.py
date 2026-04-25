@@ -20,6 +20,24 @@ api_bp = Blueprint('api', __name__)
 # Helpers
 # ---------------------------------------------------------------------------
 
+def downsample_grid(grid, max_cells=3600):
+    rows = len(grid)
+    if rows == 0:
+        return grid
+    cols = len(grid[0])
+    if rows * cols <= max_cells:
+        return grid
+    ratio = (max_cells / (rows * cols)) ** 0.5
+    target_rows = max(1, int(rows * ratio))
+    target_cols = max(1, int(cols * ratio))
+    result = [[0] * target_cols for _ in range(target_rows)]
+    for r in range(rows):
+        tr = r * target_rows // rows
+        for c in range(cols):
+            result[tr][c * target_cols // cols] += grid[r][c]
+    return result
+
+
 def _get_device_or_404(device_id):
     device = db.session.get(Device, device_id)
     if not device:
@@ -370,7 +388,8 @@ def dashboard_density_map():
         run = db.session.get(Run, int(run_id_param))
     if not run:
         return jsonify([]), 200
-    return jsonify(run.get_grid()), 200
+    max_cells = request.args.get('max_cells', 3600, type=int)
+    return jsonify(downsample_grid(run.get_grid(), max_cells)), 200
 
 
 # ---------------------------------------------------------------------------
@@ -423,7 +442,8 @@ def run_density_map(run_id):
     run = db.session.get(Run, run_id)
     if not run:
         return jsonify({'message': 'Run not found'}), 404
-    return jsonify(run.get_grid()), 200
+    max_cells = request.args.get('max_cells', 3600, type=int)
+    return jsonify(downsample_grid(run.get_grid(), max_cells)), 200
 
 
 @api_bp.route('/api/runs/<int:run_id>/species', methods=['GET'])
@@ -485,6 +505,9 @@ def detection_start(device_id):
     data = request.get_json() or {}
     mode = data.get('mode', 'grid')
     field_id = data.get('field_id')
+
+    if not field_id:
+        return jsonify({'message': 'field_id is required to start detection'}), 400
 
     run = Run(
         device_id=device.device_id,
@@ -887,24 +910,23 @@ def iot_upload():
     device_secret = request.form.get('device_secret', '')
     device = Device.query.filter_by(device_id=device_id_str).first()
     if not device or device.device_secret != device_secret:
+        current_app.logger.warning(
+            'iot_upload: Auth failed for device_id "%s".', device_id_str
+        )
         return jsonify({'message': 'Unknown device or wrong secret'}), 401
 
     job_id = request.form.get('job_id')
     step_index = request.form.get('step_index')
-    if job_id is None or step_index is None:
-        return jsonify({'message': 'job_id and step_index are required'}), 400
-
-    if 'raw_image' not in request.files or 'annotated_image' not in request.files:
-        return jsonify({'message': 'raw_image and annotated_image files are required'}), 400
-
-    raw_file = request.files['raw_image']
-    ann_file = request.files['annotated_image']
-    stem = f'{device_id_str}_job{job_id}_step{step_index}'
-    raw_path = os.path.join(current_app.config['UPLOAD_FOLDER'], secure_filename(f'{stem}_raw.jpg'))
-    ann_path = os.path.join(current_app.config['UPLOAD_FOLDER'], secure_filename(f'{stem}_annotated.jpg'))
-    raw_file.save(raw_path)
-    ann_file.save(ann_path)
-
+    required_fields = {'job_id': job_id, 'step_index': step_index}
+    missing_fields = [k for k, v in required_fields.items() if v is None]
+    if missing_fields:
+        msg = f"Missing required form field(s): {', '.join(missing_fields)}"
+        current_app.logger.warning(
+            'iot_upload: Bad request from device "%s". Reason: %s. Form keys: %s',
+            device_id_str, msg, list(request.form.keys())
+        )
+        return jsonify({'message': msg}), 400
+    
     # Parse detection data from uploaded JSON file or form field
     detections = []
     if 'detection_json' in request.files:
@@ -912,7 +934,31 @@ def iot_upload():
             det_data = json.load(request.files['detection_json'])
             detections = det_data.get('detections', [])
         except (json.JSONDecodeError, Exception):
-            pass
+            current_app.logger.warning('iot_upload: Bad request from device "%s". Reason:JSONDecodeError',device_id_str)
+            return jsonify({'message': 'Reason:JSONDecodeError'}), 400
+
+    required_files = ['raw_image']
+    if detections:
+        required_files.append('annotated_image')
+
+    missing_files = [f for f in required_files if f not in request.files]
+    if missing_files:
+        msg = f"Missing required file(s): {', '.join(missing_files)}"
+        current_app.logger.warning(
+            'iot_upload: Bad request from device "%s". Reason: %s. File keys: %s',
+            device_id_str, msg, list(request.files.keys())
+        )
+        return jsonify({'message': msg}), 400
+
+    raw_file = request.files['raw_image']
+    ann_file = request.files.get('annotated_image')
+    stem = f'{device_id_str}_job{job_id}_step{step_index}'
+    raw_path = os.path.join(current_app.config['UPLOAD_FOLDER'], secure_filename(f'{stem}_raw.jpg'))
+    raw_file.save(raw_path)
+    ann_path = None
+    if ann_file:
+        ann_path = os.path.join(current_app.config['UPLOAD_FOLDER'], secure_filename(f'{stem}_annotated.jpg'))
+        ann_file.save(ann_path)
 
     # Update active run
     run = Run.query.filter_by(id=int(job_id), status='running').first()
@@ -920,8 +966,7 @@ def iot_upload():
         run.total_photos += 1
         weed_count = len(detections)
         run.total_weeds += weed_count
-        if weed_count > 0:
-            run.cells_scanned += 1
+        run.cells_scanned += 1
 
         # Calculate grid position from step_index for grid mode runs
         grid_x, grid_y = None, None
@@ -944,6 +989,25 @@ def iot_upload():
                 annotated_image_path=ann_path,
             )
             db.session.add(wd)
+
+        if not detections:
+            wd = WeedDetection(
+                run_id=run.id,
+                field_id=run.field_id,
+                grid_x=grid_x,
+                grid_y=grid_y,
+                species='none',
+                original_image_path=raw_path,
+                annotated_image_path=None,
+            )
+            db.session.add(wd)
+
+        if run.mode == 'grid' and grid_x is not None and grid_y is not None and weed_count > 0:
+            grid = run.get_grid()
+            if 0 <= grid_y < len(grid) and 0 <= grid_x < len(grid[0]):
+                grid[grid_y][grid_x] += weed_count
+                run.set_grid(grid)
+
         db.session.commit()
 
     return jsonify({'message': 'Upload received'}), 200

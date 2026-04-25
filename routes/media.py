@@ -9,13 +9,11 @@ media_bp = Blueprint('media', __name__)
 
 
 @media_bp.route('/api/media/original/<path:filename>', methods=['GET'])
-@jwt_required()
 def serve_original(filename):
     return send_from_directory(current_app.config['UPLOAD_FOLDER'], filename)
 
 
 @media_bp.route('/api/media/annotated/<path:filename>', methods=['GET'])
-@jwt_required()
 def serve_annotated(filename):
     return send_from_directory(current_app.config['UPLOAD_FOLDER'], filename)
 

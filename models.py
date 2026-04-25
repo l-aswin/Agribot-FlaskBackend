@@ -102,7 +102,7 @@ class Run(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     device_id = db.Column(db.String(50), nullable=False)   # device_id string (AB01)
     device_db_id = db.Column(db.Integer, db.ForeignKey('devices.id'))
-    field_id = db.Column(db.Integer, db.ForeignKey('fields.id'))
+    field_id = db.Column(db.Integer, db.ForeignKey('fields.id'), nullable=False)
     mode = db.Column(db.String(20), default='grid')        # grid | route
     status = db.Column(db.String(20), default='running')   # running | finished | stopped
     started_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))

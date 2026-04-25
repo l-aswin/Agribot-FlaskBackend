@@ -23,11 +23,12 @@
 7. [Device Control — Detection](#7-device-control--detection)
 8. [Device Control — Manual Movement](#8-device-control--manual-movement)
 9. [Device Control — Pending Upload](#9-device-control--pending-upload)
-10. [Routes](#10-routes)
-11. [IoT Device Endpoints](#11-iot-device-endpoints)
-12. [Legacy Endpoints](#12-legacy-endpoints)
-13. [Error Responses](#13-error-responses)
-14. [Data Models](#14-data-models)
+10. [Media Files](#10-media-files)
+11. [Routes](#11-routes)
+12. [IoT Device Endpoints](#12-iot-device-endpoints)
+13. [Legacy Endpoints](#13-legacy-endpoints)
+14. [Error Responses](#14-error-responses)
+15. [Data Models](#15-data-models)
 
 ---
 
@@ -105,7 +106,7 @@ List all fields.
     "id": 1,
     "name": "North Paddock",
     "width": 10,
-    "height": 8,
+    "length": 8,
     "partition_type": "grid",
     "partition_count": 80,
     "created_at": "2024-01-01T00:00:00+00:00"
@@ -126,7 +127,7 @@ Create a new field.
 {
   "name": "North Paddock",
   "width": 10,
-  "height": 8,
+  "length": 8,
   "partition_type": "grid",
   "partition_count": 80
 }
@@ -136,15 +137,15 @@ Create a new field.
 |-------|------|----------|-------------|
 | `name` | string | Yes | Field name |
 | `width` | integer | Yes | Grid width (columns) |
-| `height` | integer | Yes | Grid height (rows) |
+| `length` | integer | Yes | Grid length (rows) |
 | `partition_type` | string | No | Default: `"grid"` |
-| `partition_count` | integer | No | Default: `width × height` |
+| `partition_count` | integer | No | Default: `width × length` |
 
 **Response `201`:** Field object (same shape as GET list item)
 
 **Response `400`:**
 ```json
-{ "message": "name, width, and height are required" }
+{ "message": "name, width, and length are required" }
 ```
 
 ---
@@ -155,7 +156,7 @@ Update an existing field.
 
 **Auth required:** Yes
 
-**Request body:** Any subset of the field properties (`name`, `width`, `height`, `partition_type`, `partition_count`).
+**Request body:** Any subset of the field properties (`name`, `width`, `length`, `partition_type`, `partition_count`).
 
 **Response `200`:** Updated field object
 
@@ -197,6 +198,7 @@ List all registered devices.
     "server_url": "http://192.168.1.10",
     "status": "online",
     "working": false,
+    "state": "idle",
     "created_at": "2024-01-01T00:00:00+00:00"
   }
 ]
@@ -489,17 +491,25 @@ Paginated list of all detection runs with optional filters.
   "total": 42,
   "runs": [
     {
-      "id": 1,
+      "run_id": 1,
+      "run_number": 3,
       "device_id": "AB01",
       "field_id": 1,
+      "field": "North Paddock",
       "mode": "grid",
+      "status": "finished",
+      "datetime": "2024-01-01T09:00:00+00:00",
       "started_at": "2024-01-01T09:00:00+00:00",
       "finished_at": "2024-01-01T09:45:00+00:00",
-      "total_weeds": 50
+      "weeds": 50,
+      "total_weeds": 50,
+      "duration": "00:45:00"
     }
   ]
 }
 ```
+
+`status` values: `"running"` | `"finished"` | `"stopped"`
 
 ---
 
@@ -509,7 +519,24 @@ Fetch metadata for a single run.
 
 **Auth required:** Yes
 
-**Response `200`:** Single run object (same shape as list item)
+**Response `200`:**
+```json
+{
+  "run_id": 1,
+  "run_number": 3,
+  "device_id": "AB01",
+  "field_id": 1,
+  "field": "North Paddock",
+  "mode": "grid",
+  "status": "finished",
+  "datetime": "2024-01-01T09:00:00+00:00",
+  "started_at": "2024-01-01T09:00:00+00:00",
+  "finished_at": "2024-01-01T09:45:00+00:00",
+  "weeds": 50,
+  "total_weeds": 50,
+  "duration": "00:45:00"
+}
+```
 
 **Response `404`:**
 ```json
@@ -590,8 +617,6 @@ Paginated list of individual weed detection events for a run.
       "original_url": "/api/media/original/AB01_job7_step1_raw.jpg",
       "annotated_url": "/api/media/annotated/AB01_job7_step1_annotated.jpg",
       "species": "Dandelion",
-      "lat": 40.7128,
-      "lon": -74.0060,
       "timestamp": "2024-01-01T09:05:00+00:00"
     }
   ]
@@ -631,7 +656,7 @@ Start a detection run on a device. Automatically queues a `start` IoT command fo
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `mode` | `"grid"` \| `"route"` | Yes | Detection mode (`"grid"` maps to Mode B on the device; `"route"` maps to Mode C) |
-| `field_id` | integer | No | Associated field |
+| `field_id` | integer | Yes | Associated field |
 | `grid_x` | integer | Grid mode | Number of columns |
 | `grid_y` | integer | Grid mode | Number of rows |
 | `distance` | integer | Grid mode | Cell distance in cm (sent as `travel_distance_cm` to the device) |
@@ -774,7 +799,61 @@ Queue a `stop_pending_upload` command to cancel an in-progress pending upload on
 
 ---
 
-## 10. Routes
+## 10. Media Files
+
+Endpoints that serve stored images. The URLs returned by `GET /api/runs/{runId}/detection-logs` point here.
+
+### GET `/api/media/original/<filename>`
+
+Serve a raw (unprocessed) camera image by filename.
+
+**Auth required:** Yes
+
+**Response `200`:** JPEG image (`image/jpeg`)
+
+**Response `404`:** File not found
+
+---
+
+### GET `/api/media/annotated/<filename>`
+
+Serve an annotated image (bounding boxes overlaid) by filename.
+
+**Auth required:** Yes
+
+**Response `200`:** JPEG image (`image/jpeg`)
+
+**Response `404`:** File not found
+
+---
+
+### POST `/api/media/upload`
+
+Alternative multipart image upload endpoint (mirrors `POST /api/iot_device/upload` but authenticated via JWT rather than device credentials).
+
+**Auth required:** Yes
+
+**Content-Type:** `multipart/form-data`
+
+**Form fields:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `device_id` | string | Yes | Device string identifier |
+| `job_id` | string | Yes | Run ID this upload belongs to |
+| `step_index` | string | Yes | Zero-based step counter |
+| `raw_image` | file | Yes | Raw camera photo |
+| `annotated_image` | file | Yes | Annotated photo with bounding boxes |
+| `detection_json` | file | No | Detection metadata JSON |
+
+**Response `200`:**
+```json
+{ "message": "Upload received" }
+```
+
+---
+
+## 11. Routes
 
 ### GET `/api/routes`
 
@@ -878,7 +957,7 @@ Delete a route.
 
 ---
 
-## 11. IoT Device Endpoints
+## 12. IoT Device Endpoints
 
 These endpoints are called by the Jetson Nano edge device. They do **not** require a JWT token. Authentication is performed using `device_id` and `device_secret` in the request body (POST) or query parameters (GET). All paths are under the `/api/iot_device/` prefix, which matches `base_api_url` in the device's `config.json`.
 
@@ -903,6 +982,24 @@ Startup credential verification (SRS SR-09). The device calls this once at boot 
 |-------|------|----------|
 | `device_id` | string | Yes |
 | `device_secret` | string | Yes |
+
+**Response `200`:**
+```json
+{ "message": "OK" }
+```
+
+---
+
+### POST `/api/iot_device/disconnect`
+
+Device disconnect notification. The device calls this on shutdown to mark itself `"offline"` in the database.
+
+**Auth required:** No (uses body fields)
+
+**Request body:**
+```json
+{ "device_id": "jetson-nano-01", "device_secret": "..." }
+```
 
 **Response `200`:**
 ```json
@@ -1154,7 +1251,7 @@ Fetch route steps by name for Mode C (SRS SR-27a).
 
 ---
 
-## 12. Legacy Endpoints
+## 13. Legacy Endpoints
 
 These endpoints are kept for backward compatibility.
 
@@ -1209,7 +1306,7 @@ Queue a command using the legacy integer-based format.
 
 ---
 
-## 13. Error Responses
+## 14. Error Responses
 
 All error responses return JSON with a `message` field.
 
@@ -1226,7 +1323,7 @@ All error responses return JSON with a `message` field.
 
 ---
 
-## 14. Data Models
+## 15. Data Models
 
 ### Field
 ```json
@@ -1234,7 +1331,7 @@ All error responses return JSON with a `message` field.
   "id": 1,
   "name": "North Paddock",
   "width": 10,
-  "height": 8,
+  "length": 8,
   "partition_type": "grid",
   "partition_count": 80,
   "created_at": "2024-01-01T00:00:00+00:00"
@@ -1263,15 +1360,25 @@ All error responses return JSON with a `message` field.
 ### Run
 ```json
 {
-  "id": 1,
+  "run_id": 1,
+  "run_number": 3,
   "device_id": "AB01",
   "field_id": 1,
+  "field": "North Paddock",
   "mode": "grid",
+  "status": "finished",
+  "datetime": "2024-01-01T09:00:00+00:00",
   "started_at": "2024-01-01T09:00:00+00:00",
   "finished_at": "2024-01-01T09:45:00+00:00",
-  "total_weeds": 50
+  "stopped_at": null,
+  "weeds": 50,
+  "total_weeds": 50,
+  "total_photos": 120,
+  "duration": "00:45:00"
 }
 ```
+
+`status` values: `"running"` | `"finished"` | `"stopped"`
 
 ### Detection Log Entry
 ```json
