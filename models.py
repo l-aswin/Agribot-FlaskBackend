@@ -116,6 +116,8 @@ class Run(db.Model):
     grid_distance = db.Column(db.Integer, default=0)
     cells_scanned = db.Column(db.Integer, default=0)
     grid_state_json = db.Column(db.Text)   # JSON 2D array of weed counts
+    start_row = db.Column(db.Integer, default=0)
+    start_col = db.Column(db.Integer, default=0)
 
     field = db.relationship('Field', foreign_keys=[field_id], lazy='joined')
 

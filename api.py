@@ -392,6 +392,34 @@ def dashboard_density_map():
     return jsonify(downsample_grid(run.get_grid(), max_cells)), 200
 
 
+@api_bp.route('/api/dashboard/partition-density', methods=['GET'])
+@jwt_required()
+def dashboard_partition_density():
+    field_id = request.args.get('field_id', type=int)
+    if not field_id:
+        return jsonify({'message': 'field_id is required'}), 400
+    field = db.session.get(Field, field_id)
+    if not field:
+        return jsonify({'message': 'Field not found'}), 404
+
+    n = field.partition_count or 0
+    use_row = field.partition_type != 'col'
+
+    result = []
+    for i in range(n):
+        filter_col = Run.start_row if use_row else Run.start_col
+        run = (
+            Run.query
+            .filter_by(field_id=field_id, status='finished')
+            .filter(filter_col == i)
+            .order_by(Run.started_at.desc())
+            .first()
+        )
+        result.append(run.get_grid() if run else None)
+
+    return jsonify(result), 200
+
+
 # ---------------------------------------------------------------------------
 # Runs / Analytics Endpoints
 # ---------------------------------------------------------------------------
@@ -531,6 +559,9 @@ def detection_start(device_id):
         route = db.session.get(Route, route_id)
         if not route:
             return jsonify({'message': 'Route not found'}), 404
+
+    run.start_row = data.get('start_row', 0)
+    run.start_col = data.get('start_col', 0)
 
     db.session.add(run)
     device.working = True
