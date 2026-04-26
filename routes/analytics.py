@@ -2,23 +2,23 @@ import os
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required
 from datetime import datetime, timezone
-from models import db, Run, WeedDetection
+from models import db, Run, WeedDetection, Device
 
 analytics_bp = Blueprint('analytics', __name__)
 
 
 def _run_payload(r):
     duration = None
-    if r.completed_at and r.started_at:
-        duration = int((r.completed_at - r.started_at).total_seconds())
+    if r.started_at and r.finished_at:
+        duration = int((r.finished_at - r.started_at).total_seconds())
     return {
-        "id": r.id,
-        "field_id": r.field_id,
-        "device_id": r.device_id,
-        "started_at": r.started_at.isoformat(),
-        "completed_at": r.completed_at.isoformat() if r.completed_at else None,
-        "total_weeds": r.total_weeds,
-        "duration_seconds": duration,
+        'id': r.id,
+        'run_number': r.id,
+        'device_id': r.device_id,
+        'field': {'id': r.field.id, 'name': r.field.name} if r.field else None,
+        'datetime': r.started_at.isoformat() if r.started_at else None,
+        'duration': duration,
+        'weeds': r.total_weeds,
     }
 
 
@@ -27,7 +27,7 @@ def _run_payload(r):
 def list_runs():
     device_id = request.args.get('device_id')
     field_id = request.args.get('field_id', type=int)
-    month = request.args.get('month')       # YYYY-MM
+    month = request.args.get('month')
     page = request.args.get('page', 1, type=int)
     limit = request.args.get('limit', 20, type=int)
 
@@ -38,82 +38,76 @@ def list_runs():
         q = q.filter_by(field_id=field_id)
     if month:
         try:
-            start = datetime.strptime(month, '%Y-%m').replace(tzinfo=timezone.utc)
-            end = start.replace(year=start.year + 1, month=1) if start.month == 12 \
-                else start.replace(month=start.month + 1)
+            year, mon = map(int, month.split('-'))
+            start = datetime(year, mon, 1, tzinfo=timezone.utc)
+            end = datetime(year + 1, 1, 1, tzinfo=timezone.utc) if mon == 12 \
+                else datetime(year, mon + 1, 1, tzinfo=timezone.utc)
             q = q.filter(Run.started_at >= start, Run.started_at < end)
         except ValueError:
-            return jsonify({"msg": "month must be YYYY-MM"}), 400
+            return jsonify({'message': 'month must be YYYY-MM'}), 400
 
-    pagination = q.order_by(Run.started_at.desc()).paginate(page=page, per_page=limit, error_out=False)
-    return jsonify({
-        "page": page,
-        "limit": limit,
-        "total": pagination.total,
-        "runs": [_run_payload(r) for r in pagination.items],
-    }), 200
+    total = q.count()
+    runs = q.order_by(Run.started_at.desc()).offset((page - 1) * limit).limit(limit).all()
+    return jsonify({'runs': [_run_payload(r) for r in runs], 'total': total}), 200
 
 
 @analytics_bp.route('/api/runs/<int:run_id>', methods=['GET'])
 @jwt_required()
 def get_run(run_id):
-    r = Run.query.get_or_404(run_id)
-    return jsonify(_run_payload(r)), 200
+    run = db.session.get(Run, run_id)
+    if not run:
+        return jsonify({'message': 'Run not found'}), 404
+    return jsonify(_run_payload(run)), 200
 
 
 @analytics_bp.route('/api/runs/<int:run_id>/density-map', methods=['GET'])
 @jwt_required()
 def run_density_map(run_id):
-    Run.query.get_or_404(run_id)
-    rows = db.session.query(
-        WeedDetection.grid_x,
-        WeedDetection.grid_y,
-        db.func.sum(WeedDetection.count).label('density')
-    ).filter_by(run_id=run_id).group_by(WeedDetection.grid_x, WeedDetection.grid_y).all()
-    return jsonify([{"x": r.grid_x, "y": r.grid_y, "density": int(r.density)} for r in rows]), 200
+    run = db.session.get(Run, run_id)
+    if not run:
+        return jsonify({'message': 'Run not found'}), 404
+    return jsonify(run.get_grid()), 200
 
 
 @analytics_bp.route('/api/runs/<int:run_id>/species', methods=['GET'])
 @jwt_required()
 def run_species(run_id):
-    Run.query.get_or_404(run_id)
+    if not db.session.get(Run, run_id):
+        return jsonify({'message': 'Run not found'}), 404
     rows = db.session.query(
         WeedDetection.species,
         db.func.sum(WeedDetection.count).label('total')
     ).filter_by(run_id=run_id).group_by(WeedDetection.species).all()
-    return jsonify([{"species": r.species, "count": int(r.total)} for r in rows]), 200
+    return jsonify([{'species': r.species, 'count': int(r.total)} for r in rows]), 200
 
 
 @analytics_bp.route('/api/runs/<int:run_id>/device-summary', methods=['GET'])
 @jwt_required()
 def run_device_summary(run_id):
-    r = Run.query.get_or_404(run_id)
-    photo_count = WeedDetection.query.filter_by(run_id=run_id).filter(
-        WeedDetection.original_image_path.isnot(None)
-    ).count()
-    run_time_s = None
-    if r.completed_at and r.started_at:
-        run_time_s = int((r.completed_at - r.started_at).total_seconds())
+    run = db.session.get(Run, run_id)
+    if not run:
+        return jsonify({'message': 'Run not found'}), 404
+    device = Device.query.filter_by(device_id=run.device_id).first()
     return jsonify({
-        "device_id": r.device_id,
-        "total_weeds": r.total_weeds,
-        "total_photos": photo_count,
-        "run_time_seconds": run_time_s,
-        "started_at": r.started_at.isoformat(),
-        "completed_at": r.completed_at.isoformat() if r.completed_at else None,
+        'device_id': run.device_id,
+        'device_name': device.name if device else None,
+        'serial_port': device.serial_port if device else None,
+        'camera_index': device.camera_index if device else None,
+        'confidence_threshold': device.confidence_threshold if device else None,
     }), 200
 
 
 @analytics_bp.route('/api/runs/<int:run_id>/detection-logs', methods=['GET'])
 @jwt_required()
 def run_detection_logs(run_id):
-    Run.query.get_or_404(run_id)
+    if not db.session.get(Run, run_id):
+        return jsonify({'message': 'Run not found'}), 404
     page = request.args.get('page', 1, type=int)
-    limit = request.args.get('limit', 50, type=int)
+    limit = request.args.get('limit', 20, type=int)
 
-    pagination = WeedDetection.query.filter_by(run_id=run_id).order_by(
-        WeedDetection.detected_at.asc()
-    ).paginate(page=page, per_page=limit, error_out=False)
+    q = WeedDetection.query.filter_by(run_id=run_id).order_by(WeedDetection.detected_at.asc())
+    total = q.count()
+    logs = q.offset((page - 1) * limit).limit(limit).all()
 
     base_url = request.host_url.rstrip('/')
 
@@ -123,19 +117,14 @@ def run_detection_logs(run_id):
         return f"{base_url}/api/media/{kind}/{os.path.basename(path)}"
 
     return jsonify({
-        "page": page,
-        "limit": limit,
-        "total": pagination.total,
-        "logs": [{
-            "id": d.id,
-            "grid_x": d.grid_x,
-            "grid_y": d.grid_y,
-            "coord_x": d.coord_x,
-            "coord_y": d.coord_y,
-            "species": d.species,
-            "count": d.count,
-            "detected_at": d.detected_at.isoformat(),
-            "original_image_url": image_url(d.original_image_path, 'original'),
-            "annotated_image_url": image_url(d.annotated_image_path, 'annotated'),
-        } for d in pagination.items],
+        'total': total,
+        'logs': [{
+            'id': d.id,
+            'timestamp': d.detected_at.isoformat() if d.detected_at else None,
+            'species': d.species,
+            'confidence': d.confidence,
+            'cell': d.grid_x,
+            'image_url': image_url(d.annotated_image_path, 'annotated')
+                         or image_url(d.original_image_path, 'original'),
+        } for d in logs],
     }), 200

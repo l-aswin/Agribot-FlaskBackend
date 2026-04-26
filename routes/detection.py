@@ -1,140 +1,183 @@
+import json
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required
 from datetime import datetime, timezone
-from models import db, Device, DeviceCommand, Run, WeedDetection, ActiveDetection
+from models import db, Device, DeviceCommand, Run, WeedDetection, IoTCommand
 
 detection_bp = Blueprint('detection', __name__)
 
-_COMMAND_MAP = {'forward': 0, 'backward': 1, 'right': 2, 'left': 3}
+_COMMAND_MAP = {'forward': 0, 'backward': 1, 'right': 2, 'left': 3, 'weed': 5}
 
 
-# --- Weed Detection ---
+def _total_steps_for_run(run):
+    field = run.field
+    device = db.session.get(Device, run.device_db_id)
+    camera_width = device.camera_vision_width_cm if device else None
+    if not field or not camera_width:
+        return 0
+    forward_cm = field.length * 100 if field.partition_type == 'row' else field.width * 100
+    return round(forward_cm / camera_width)
 
-@detection_bp.route('/api/devices/<string:device_id>/detection/start', methods=['POST'])
+
+# ---------------------------------------------------------------------------
+# Detection
+# ---------------------------------------------------------------------------
+
+@detection_bp.route('/api/devices/<int:device_id>/detection/start', methods=['POST'])
 @jwt_required()
 def detection_start(device_id):
-    device = Device.query.get_or_404(device_id)
-    data = request.get_json() or {}
-    mode = data.get('mode', 'grid')
+    device = db.session.get(Device, device_id)
+    if not device:
+        return jsonify({'message': 'Device not found'}), 404
+    if device.working:
+        return jsonify({'message': 'Device is already running a detection'}), 409
 
-    run = Run(field_id=device.field_id, device_id=device_id)
+    data = request.get_json() or {}
+    field_id = data.get('field_id')
+    if not field_id:
+        return jsonify({'message': 'field_id is required'}), 400
+
+    mode = data.get('mode', 'grid')
+    run = Run(
+        device_id=device.device_id,
+        device_db_id=device.id,
+        field_id=field_id,
+        mode=mode,
+        status='running',
+    )
+
+    if mode == 'grid':
+        grid_x = data.get('grid_x', 5)
+        grid_y = data.get('grid_y', 5)
+        run.grid_x = grid_x
+        run.grid_y = grid_y
+        run.grid_distance = data.get('distance', 100)
+        run.start_row = data.get('start_row', 0)
+        run.start_col = data.get('start_col', 0)
+        run.grid_state_json = json.dumps([[0] * grid_x for _ in range(grid_y)])
+        iot_payload = {'mode': 'B', 'job_id': None, 'travel_distance_cm': run.grid_distance}
+    elif mode == 'route':
+        route_id = data.get('route_id')
+        if not route_id:
+            return jsonify({'message': 'route_id is required for route mode'}), 400
+        iot_payload = {'mode': 'C', 'job_id': None, 'route_id': route_id}
+    else:
+        iot_payload = {'mode': mode, 'job_id': None}
+
     db.session.add(run)
+    device.working = True
+    device.state = 'working'
     db.session.flush()
 
-    ad = ActiveDetection.query.get(device_id)
-    if not ad:
-        ad = ActiveDetection(device_id=device_id)
-        db.session.add(ad)
-
-    now = datetime.now(timezone.utc)
-    ad.run_id = run.id
-    ad.status = 'running'
-    ad.cells_scanned = 0
-    ad.weeds_found = 0
-    ad.position_x = data.get('grid_x', 0)
-    ad.position_y = data.get('grid_y', 0)
-    ad.cells_total = data.get('distance', 0)
-    ad.started_at = now
-    ad.finished_at = None
-    ad.last_updated = now
-
-    device.status = 'working'
+    iot_payload['job_id'] = run.id
+    db.session.add(IoTCommand(
+        device_id=device.device_id,
+        command='start',
+        payload_json=json.dumps(iot_payload),
+    ))
     db.session.commit()
-    return jsonify({"msg": "Detection started", "run_id": run.id, "mode": mode}), 200
+    return jsonify({'message': 'Detection started'}), 200
 
 
-@detection_bp.route('/api/devices/<string:device_id>/detection/stop', methods=['POST'])
+@detection_bp.route('/api/devices/<int:device_id>/detection/stop', methods=['POST'])
 @jwt_required()
 def detection_stop(device_id):
-    ad = ActiveDetection.query.get_or_404(device_id)
+    device = db.session.get(Device, device_id)
+    if not device:
+        return jsonify({'message': 'Device not found'}), 404
+
+    run = Run.query.filter_by(device_db_id=device_id, status='running').order_by(Run.started_at.desc()).first()
     now = datetime.now(timezone.utc)
-    ad.status = 'stopped'
-    ad.finished_at = now
-    ad.last_updated = now
+    if run:
+        run.status = 'stopped'
+        run.stopped_at = now
 
-    if ad.run_id:
-        run = Run.query.get(ad.run_id)
-        if run:
-            run.completed_at = now
-
-    device = Device.query.get(device_id)
-    if device:
-        device.status = 'idle'
-
+    device.working = False
+    device.state = 'idle'
+    db.session.add(IoTCommand(device_id=device.device_id, command='stop', payload_json='{}'))
     db.session.commit()
-    return jsonify({"msg": "Detection stopped", "stopped_at": now.isoformat()}), 200
+    return jsonify({'message': 'Detection stopped'}), 200
 
 
-@detection_bp.route('/api/devices/<string:device_id>/detection/status', methods=['GET'])
+@detection_bp.route('/api/devices/<int:device_id>/detection/status', methods=['GET'])
 @jwt_required()
 def detection_status(device_id):
-    Device.query.get_or_404(device_id)
-    ad = ActiveDetection.query.get(device_id)
-    if not ad:
+    device = db.session.get(Device, device_id)
+    if not device:
+        return jsonify({'message': 'Device not found'}), 404
+
+    run = Run.query.filter_by(device_db_id=device_id).order_by(Run.started_at.desc()).first()
+    if not run:
         return jsonify({
-            "status": "idle",
-            "cells_total": 0,
-            "cells_scanned": 0,
-            "weeds_found": 0,
-            "device_position": {"x": 0, "y": 0},
-            "last_updated": None,
+            'status': 'idle',
+            'current_steps': 0,
+            'total_steps': 0,
+            'total_distance_cm': 0,
+            'cells_scanned': 0,
+            'weeds_found': 0,
+            'finished_at': None,
+            'stopped_at': None,
         }), 200
 
+    total_steps = _total_steps_for_run(run)
     return jsonify({
-        "status": ad.status,
-        "run_id": ad.run_id,
-        "cells_total": ad.cells_total,
-        "cells_scanned": ad.cells_scanned,
-        "weeds_found": ad.weeds_found,
-        "device_position": {"x": ad.position_x, "y": ad.position_y},
-        "started_at": ad.started_at.isoformat() if ad.started_at else None,
-        "finished_at": ad.finished_at.isoformat() if ad.finished_at else None,
-        "last_updated": ad.last_updated.isoformat() if ad.last_updated else None,
+        'status': run.status,
+        'current_steps': run.cells_scanned,
+        'total_steps': total_steps,
+        'total_distance_cm': run.grid_distance or 0,
+        'cells_scanned': run.cells_scanned,
+        'weeds_found': run.total_weeds,
+        'finished_at': run.finished_at.isoformat() if run.finished_at else None,
+        'stopped_at': run.stopped_at.isoformat() if run.stopped_at else None,
     }), 200
 
 
-@detection_bp.route('/api/devices/<string:device_id>/detection/grid', methods=['GET'])
+@detection_bp.route('/api/devices/<int:device_id>/detection/grid', methods=['GET'])
 @jwt_required()
 def detection_grid(device_id):
-    Device.query.get_or_404(device_id)
-    ad = ActiveDetection.query.get(device_id)
-    if not ad or not ad.run_id:
-        return jsonify([]), 200
+    device = db.session.get(Device, device_id)
+    if not device:
+        return jsonify({'message': 'Device not found'}), 404
 
-    rows = db.session.query(
-        WeedDetection.grid_x,
-        WeedDetection.grid_y,
-        db.func.sum(WeedDetection.count).label('density')
-    ).filter_by(run_id=ad.run_id).group_by(
-        WeedDetection.grid_x, WeedDetection.grid_y
-    ).all()
+    run = Run.query.filter_by(device_db_id=device_id).order_by(Run.started_at.desc()).first()
+    if not run:
+        return jsonify([{'cell': i, 'weed_count': 0, 'step_count': 0} for i in range(20)]), 200
 
-    return jsonify([{"x": r.grid_x, "y": r.grid_y, "density": int(r.density)} for r in rows]), 200
+    detections = WeedDetection.query.filter_by(run_id=run.id).order_by(WeedDetection.id).all()
+    total_steps = _total_steps_for_run(run)
+    steps_per_cell = max(1, total_steps // 20) if total_steps > 0 else 1
+    buckets = [{'weed_count': 0, 'step_count': 0} for _ in range(20)]
+    for i, det in enumerate(detections):
+        idx = min(i // steps_per_cell, 19)
+        if det.species != 'none':
+            buckets[idx]['weed_count'] += det.count
+        buckets[idx]['step_count'] += 1
+
+    return jsonify([{'cell': i, **b} for i, b in enumerate(buckets)]), 200
 
 
-# --- Manual Control ---
+# ---------------------------------------------------------------------------
+# Manual Control
+# ---------------------------------------------------------------------------
 
-@detection_bp.route('/api/devices/<string:device_id>/move', methods=['POST'])
+@detection_bp.route('/api/devices/<int:device_id>/move', methods=['POST'])
 @jwt_required()
 def device_move(device_id):
-    Device.query.get_or_404(device_id)
+    device = db.session.get(Device, device_id)
+    if not device:
+        return jsonify({'message': 'Device not found'}), 404
     data = request.get_json() or {}
     command = data.get('command')
     value = data.get('value')
-
+    if not command or value is None:
+        return jsonify({'message': 'command and value are required'}), 400
     if command not in _COMMAND_MAP:
-        return jsonify({"msg": f"command must be one of {tuple(_COMMAND_MAP)}"}), 400
+        return jsonify({'message': f'command must be one of {list(_COMMAND_MAP)}'}), 400
 
-    new_cmd = DeviceCommand(
-        device_id=device_id,
+    db.session.add(DeviceCommand(
+        device_id=device.device_id,
         command_value=_COMMAND_MAP[command],
         status='pending',
-    )
-    db.session.add(new_cmd)
+    ))
     db.session.commit()
-    return jsonify({
-        "msg": "Move command queued",
-        "command": command,
-        "value": value,
-        "command_id": new_cmd.id,
-    }), 201
+    return jsonify({'message': 'Command sent'}), 200

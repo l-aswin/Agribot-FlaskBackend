@@ -45,7 +45,7 @@ class Field(db.Model):
             'length': self.length,
             'partition_type': self.partition_type,
             'partition_count': self.partition_count,
-            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'created_date': self.created_at.isoformat() if self.created_at else None,
         }
 
 
@@ -66,25 +66,24 @@ class Device(db.Model):
     state = db.Column(db.String(20), default='idle')   # idle | working | pending_upload
     created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
-    def to_dict(self, include_settings=False):
-        d = {
+    def to_dict(self):
+        return {
             'id': self.id,
             'name': self.name,
             'device_id': self.device_id,
+            'device_secret': self.device_secret,
             'server_url': self.server_url,
-            'status': self.status,
+            'serial_port': self.serial_port,
+            'serial_baud_rate': str(self.serial_baud_rate) if self.serial_baud_rate is not None else None,
+            'camera_index': str(self.camera_index) if self.camera_index is not None else None,
+            'confidence_threshold': str(self.confidence_threshold) if self.confidence_threshold is not None else None,
+            'camera_vision_width_cm': str(self.camera_vision_width_cm) if self.camera_vision_width_cm is not None else None,
+            'status': self.state,
             'online': self.status == 'online',
             'working': self.working,
-            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'state': self.state,
+            'created_date': self.created_at.isoformat() if self.created_at else None,
         }
-        if include_settings:
-            d.update({
-                'serial_port': self.serial_port,
-                'serial_baud_rate': self.serial_baud_rate,
-                'camera_index': self.camera_index,
-                'confidence_threshold': self.confidence_threshold,
-            })
-        return d
 
     def settings_dict(self):
         return {
@@ -129,19 +128,13 @@ class Run(db.Model):
         if self.started_at and self.finished_at:
             duration = int((self.finished_at - self.started_at).total_seconds())
         return {
-            'run_id': self.id,
+            'id': self.id,
             'run_number': self.id,
             'device_id': self.device_id,
-            'field_id': self.field_id,
-            'field': self.field.name if self.field else None,
-            'mode': self.mode,
-            'status': self.status,
+            'field': {'id': self.field.id, 'name': self.field.name} if self.field else None,
             'datetime': self.started_at.isoformat() if self.started_at else None,
-            'started_at': self.started_at.isoformat() if self.started_at else None,
-            'finished_at': self.finished_at.isoformat() if self.finished_at else None,
-            'weeds': self.total_weeds,
-            'total_weeds': self.total_weeds,
             'duration': duration,
+            'weeds': self.total_weeds,
         }
 
     def _init_grid(self):
@@ -169,6 +162,7 @@ class WeedDetection(db.Model):
     coord_x = db.Column(db.Float, nullable=True)
     coord_y = db.Column(db.Float, nullable=True)
     species = db.Column(db.String(100), nullable=False)
+    confidence = db.Column(db.Float, nullable=True)
     count = db.Column(db.Integer, default=1)
     original_image_path = db.Column(db.String(255), nullable=True)
     annotated_image_path = db.Column(db.String(255), nullable=True)

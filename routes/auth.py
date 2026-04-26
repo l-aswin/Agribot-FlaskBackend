@@ -24,7 +24,7 @@ def auth_logout():
     jti = get_jwt()['jti']
     db.session.add(TokenBlocklist(jti=jti))
     db.session.commit()
-    return jsonify({"msg": "Successfully logged out"}), 200
+    return jsonify({"message": "Logged out successfully"}), 200
 
 
 @auth_bp.route('/api/auth/me', methods=['GET'])
@@ -32,7 +32,7 @@ def auth_logout():
 def auth_me():
     username = get_jwt_identity()
     user = User.query.filter_by(username=username).first_or_404()
-    return jsonify({"id": user.id, "username": user.username}), 200
+    return jsonify({"id": user.id, "username": user.username, "email": None}), 200
 
 
 # Legacy login endpoint

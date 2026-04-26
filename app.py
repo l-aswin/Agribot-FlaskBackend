@@ -6,6 +6,12 @@ from flask_migrate import Migrate
 from models import db, jwt, User
 from api import api_bp
 from routes.media import media_bp
+from routes.auth import auth_bp
+from routes.fields import fields_bp
+from routes.devices import devices_bp
+from routes.detection import detection_bp
+from routes.analytics import analytics_bp
+from routes.dashboard import dashboard_bp
 
 app = Flask(__name__)
 CORS(
@@ -34,6 +40,12 @@ migrate = Migrate(app, db)
 # --- Register Blueprints ---
 app.register_blueprint(api_bp)
 app.register_blueprint(media_bp)
+app.register_blueprint(auth_bp)
+app.register_blueprint(fields_bp)
+app.register_blueprint(devices_bp)
+app.register_blueprint(detection_bp)
+app.register_blueprint(analytics_bp)
+app.register_blueprint(dashboard_bp)
 
 if __name__ == '__main__':
     with app.app_context():
