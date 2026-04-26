@@ -51,6 +51,37 @@ def list_runs():
     return jsonify({'runs': [_run_payload(r) for r in runs], 'total': total}), 200
 
 
+@analytics_bp.route('/api/runs', methods=['DELETE'])
+@jwt_required()
+def delete_runs():
+    device_id = request.args.get('device_id')
+    field_id  = request.args.get('field_id', type=int)
+    month     = request.args.get('month')
+
+    q = Run.query
+    if device_id:
+        q = q.filter_by(device_id=device_id)
+    if field_id:
+        q = q.filter_by(field_id=field_id)
+    if month:
+        try:
+            year, mon = map(int, month.split('-'))
+            start = datetime(year, mon, 1, tzinfo=timezone.utc)
+            end   = datetime(year + 1, 1, 1, tzinfo=timezone.utc) if mon == 12 \
+                    else datetime(year, mon + 1, 1, tzinfo=timezone.utc)
+            q = q.filter(Run.started_at >= start, Run.started_at < end)
+        except ValueError:
+            return jsonify({'message': 'month must be YYYY-MM'}), 400
+
+    run_ids = [r.id for r in q.with_entities(Run.id).all()]
+    if run_ids:
+        WeedDetection.query.filter(WeedDetection.run_id.in_(run_ids)).delete(synchronize_session=False)
+        Run.query.filter(Run.id.in_(run_ids)).delete(synchronize_session=False)
+        db.session.commit()
+
+    return jsonify({'deleted': len(run_ids)}), 200
+
+
 @analytics_bp.route('/api/runs/<int:run_id>', methods=['GET'])
 @jwt_required()
 def get_run(run_id):
