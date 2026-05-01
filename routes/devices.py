@@ -4,6 +4,7 @@ import urllib.request
 from flask import Blueprint, request, jsonify
 from flask_jwt_extended import jwt_required
 from models import db, Device, Route, IoTCommand
+from api import _mark_stale_if_needed
 
 devices_bp = Blueprint('devices', __name__)
 
@@ -15,7 +16,10 @@ devices_bp = Blueprint('devices', __name__)
 @devices_bp.route('/api/devices', methods=['GET'])
 @jwt_required()
 def list_devices():
-    return jsonify([d.to_dict() for d in Device.query.order_by(Device.id).all()]), 200
+    devices = Device.query.order_by(Device.id).all()
+    for d in devices:
+        _mark_stale_if_needed(d)
+    return jsonify([d.to_dict() for d in devices]), 200
 
 
 @devices_bp.route('/api/devices/check-name', methods=['GET'])

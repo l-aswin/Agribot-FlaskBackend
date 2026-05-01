@@ -65,6 +65,7 @@ class Device(db.Model):
     working = db.Column(db.Boolean, default=False)
     state = db.Column(db.String(20), default='idle')   # idle | working | pending_upload
     created_at = db.Column(db.DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    last_seen = db.Column(db.DateTime(timezone=True), nullable=True)
 
     def to_dict(self):
         return {
@@ -80,6 +81,7 @@ class Device(db.Model):
             'camera_vision_width_cm': str(self.camera_vision_width_cm) if self.camera_vision_width_cm is not None else None,
             'status': self.state,
             'online': self.status == 'online',
+            'last_seen': self.last_seen.isoformat() if self.last_seen else None,
             'working': self.working,
             'state': self.state,
             'created_date': self.created_at.isoformat() if self.created_at else None,

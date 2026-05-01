@@ -144,14 +144,30 @@ def detection_grid(device_id):
         return jsonify([{'cell': i, 'weed_count': 0, 'step_count': 0} for i in range(20)]), 200
 
     detections = WeedDetection.query.filter_by(run_id=run.id).order_by(WeedDetection.id).all()
+    GRID_SIZE = 20
     total_steps = _total_steps_for_run(run)
-    steps_per_cell = max(1, total_steps // 20) if total_steps > 0 else 1
-    buckets = [{'weed_count': 0, 'step_count': 0} for _ in range(20)]
+    scanned = run.cells_scanned
+
+    cells_per_step = GRID_SIZE / total_steps if total_steps > 0 else GRID_SIZE
+    buckets = [{'weed_count': 0, 'step_count': 0} for _ in range(GRID_SIZE)]
+
+    # Mark all scanned steps as visited (step_count=1) across their display cells
+    for step_i in range(min(scanned, total_steps or scanned)):
+        start = round(step_i * cells_per_step)
+        end = round((step_i + 1) * cells_per_step)
+        for ci in range(start, min(end, GRID_SIZE)):
+            buckets[ci]['step_count'] = 1
+
+    # Distribute weed counts: each detection record corresponds to one step (in order)
     for i, det in enumerate(detections):
-        idx = min(i // steps_per_cell, 19)
-        if det.species != 'none':
-            buckets[idx]['weed_count'] += det.count
-        buckets[idx]['step_count'] += 1
+        if total_steps > 0 and i >= total_steps:
+            break
+        step_i = i
+        start = round(step_i * cells_per_step)
+        end = round((step_i + 1) * cells_per_step)
+        for ci in range(start, min(end, GRID_SIZE)):
+            if det.species != 'none':
+                buckets[ci]['weed_count'] += det.count
 
     return jsonify([{'cell': i, **b} for i, b in enumerate(buckets)]), 200
 

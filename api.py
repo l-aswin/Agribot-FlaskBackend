@@ -33,6 +33,18 @@ def _auth_iot_device():
     return device, None
 
 
+_POLL_TIMEOUT_SECONDS = 5
+
+def _mark_stale_if_needed(device):
+    """Set device offline if last command poll was more than _POLL_TIMEOUT_SECONDS ago."""
+    if device.last_seen is None:
+        return
+    age = (datetime.now(timezone.utc) - device.last_seen).total_seconds()
+    if age > _POLL_TIMEOUT_SECONDS and device.status == 'online':
+        device.status = 'offline'
+        db.session.commit()
+
+
 # ---------------------------------------------------------------------------
 # Jetson Legacy Endpoints
 # ---------------------------------------------------------------------------
@@ -150,9 +162,8 @@ def iot_devicecheck():
     device, err = _auth_iot_device()
     if err:
         return err
-    device.status = 'online'
-    db.session.commit()
-    return jsonify({'message': 'OK'}), 200
+    _mark_stale_if_needed(device)
+    return jsonify({'message': 'OK', 'online': device.status == 'online'}), 200
 
 
 @api_bp.route('/api/iot_device/disconnect', methods=['POST'])
@@ -172,6 +183,10 @@ def iot_command_poll():
     device, err = _auth_iot_device()
     if err:
         return err
+
+    device.last_seen = datetime.now(timezone.utc)
+    device.status = 'online'
+    db.session.commit()
 
     cmd = IoTCommand.query.filter_by(
         device_id=device.device_id, status='pending'
